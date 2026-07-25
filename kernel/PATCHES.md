@@ -14,6 +14,17 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8650/patches/linux/0007-audioreach-Add-dedicated-WSA2-support.patch
 - `patches/0010-msm-resource-cleanup.patch`
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/packages/linux/patches/7.0/0010-msm-resource-cleanup.patch
+- `patches/0011-drm-msm-dpu-enable-8bpc-dither-on-ayn-odin3.patch`
+  source: armada
+  notes: tested downstream Odin 3 static ordered 8-bpc DPU output dithering,
+  applied after the 0010 resource cleanup. It preserves the existing 6-bpc path
+  and enables the existing static matrix at 8-bpc only when the root machine
+  compatible is `ayn,odin3`; 8-bpc on other machines and all unsupported depths
+  retain their disable behavior.
+  Temporal dithering remains disabled. The patch makes no RGB101010, panel
+  descriptor, DSI, or DSC changes. Treat visible noise, contouring, color
+  shift, flicker, panel instability, or a boot/display regression as a stop
+  condition and roll back to the stock kernel rather than widening the scope.
 - `patches/0048-drm-msm-dsi-reparent-byte-pixel-src-to-xo-on-disable.patch`
   source: https://github.com/ROCKNIX/distribution/blob/b59f018e09f04cc3020d60a93abb990318a551ba/projects/ROCKNIX/devices/SM8750/patches/linux/0048-drm-msm-dsi-reparent-byte-pixel-src-to-xo-on-disable.patch
 - `patches/0015-touchscreen-edt-ft5x06-allow-to-override-input-name.patch`
