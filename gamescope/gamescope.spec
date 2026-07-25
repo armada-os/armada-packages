@@ -7,7 +7,7 @@
 Name:           gamescope
 # overwritten from BASE.env by build.sh
 Version:        0
-Release:        1%{?dist}.armada
+Release:        11.0%{?dist}.armada
 Summary:        Micro-compositor for video games on Wayland
 # Automatically converted from old format: BSD - review is highly recommended.
 License:        LicenseRef-Callaway-BSD
@@ -33,6 +33,39 @@ Patch:          0004-DRMBackend-Add-GAMESCOPE_FAKE_OUTPUT_MM-env-to-set-c.patch
 Patch:          0005-feature-add-rotation-shader-for-rotating-output.patch
 Patch:          0006-steamcompmgr-fix-gamepad-cursor-sprite-frozen-via-XTest.patch
 Patch:          0007-steamcompmgr-fallback-appid-focus.patch
+# Allow a device-specific, opt-in known-display profile with qualified physical
+# geometry for EDID-less internal DSI panels.
+Patch:          0008-drm-allow-explicit-edidless-internal-panel-profiles.patch
+# Keep Gamma 2.2 HDR color conversion in Vulkan when DRM cannot perform it.
+Patch:          0009-drm-compose-gamma22-hdr-without-hardware-color-management.patch
+# Advertise only synthetic HDR formats backed by the selected Vulkan surface.
+Patch:          0010-wsi-filter-hdr-formats-by-underlying-support.patch
+# Make Steam's SDR-on-HDR brightness control affect traditional Gamma 2.2 HDR.
+Patch:          0011-color-scale-sdr-white-on-gamma22-hdr-output.patch
+# Allow an opt-in client format set based on Vulkan sampling rather than KMS scanout.
+Patch:          0012-expose-client-sampleable-formats.patch
+# Convert explicitly identified SDR game layers through the qualified HDR output path.
+Patch:          0013-auto-hdr-per-layer-composition.patch
+# Preserve the configured SDR gamut when those layers enter the Auto HDR path.
+Patch:          0014-auto-hdr-gamut-continuity.patch
+# Concentrate Auto HDR expansion in highlights while preserving the SDR baseline.
+Patch:          0015-auto-hdr-selective-highlight-curve.patch
+# Bound local highlight gain and separate converted-content ceiling from output peak.
+Patch:          0016-auto-hdr-bounded-soft-shoulder.patch
+# Add opt-in scene analysis, broad-field limiting, and temporal adaptation.
+Patch:          0017-auto-hdr-adaptive-scene-control.patch
+# Analyze scaled sRGB LINEAR scenes with compositor-matched reconstruction.
+Patch:          0018-auto-hdr-scaled-srgb-linear-analysis.patch
+# Use a luminance histogram, temporal scene control, and conservative
+# persistent-HUD statistics for High Quality Auto HDR.
+Patch:          0020-auto-hdr-histogram-hud-quality.patch
+# Protect saturated BT.2020 colors and verify near-black monotonicity.
+Patch:          0021-auto-hdr-gamut-near-black.patch
+# Classify representable SDR inputs and report selected KMS composition depth.
+Patch:          0022-auto-hdr-input-output-contract.patch
+# Expose Quality as the sole selectable engine while retaining Efficient fallback.
+Patch:          0023-autohdr-use-quality-mode-when-available.patch
+Patch:          0024-autohdr-report-only-rendered-conversion-as-active.patch
 
 BuildRequires:  cmake
 BuildRequires:  catch-devel
@@ -122,12 +155,16 @@ export PKG_CONFIG_PATH=pkgconfig
     -Denable_gamescope=true \
     -Denable_gamescope_wsi_layer=true \
     -Denable_openvr_support=true \
+    -Denable_tests=true \
     -Dforce_fallback_for=[] \
     -Dinput_emulation=enabled \
     -Dpipewire=enabled \
     -Drt_cap=enabled \
     -Dsdl2_backend=enabled
 %meson_build
+
+%check
+%meson_test
 
 %install
 %meson_install --skip-subprojects

@@ -1,0 +1,706 @@
+diff --git a/src/AutoHDRColor.cpp b/src/AutoHDRColor.cpp
+index 832ec72992750c2cbddd60d58f1d307cb5df37f9..b35f128ab572626555512b6df4e3e56260f620f4 100644
+--- a/src/AutoHDRColor.cpp
++++ b/src/AutoHDRColor.cpp
+@@ -61,18 +61,21 @@ namespace gamescope::autohdr
+ 		return { srgbDecode( encoded.r ), srgbDecode( encoded.g ), srgbDecode( encoded.b ) };
+ 	}
+ 
+-	RGB rec709ToRec2020( const RGB &linearRec709 )
++	RGB applyLinearTransform( const RGB &linear, const LinearTransform &transform )
+ 	{
+-		// Linear-light BT.709 to BT.2020, derived from the standard primaries
+-		// with their shared D65 white point.
+-		const RGB input = bounded( linearRec709, 1.0 );
++		const RGB input = bounded( linear, 1.0 );
+ 		return {
+-			0.627403895934699 * input.r + 0.329283038377883 * input.g + 0.043313065687418 * input.b,
+-			0.069097289358232 * input.r + 0.919540395075459 * input.g + 0.011362315566309 * input.b,
+-			0.016391438875150 * input.r + 0.088013307877226 * input.g + 0.895595253247624 * input.b,
++			transform.m[0][0] * input.r + transform.m[0][1] * input.g + transform.m[0][2] * input.b,
++			transform.m[1][0] * input.r + transform.m[1][1] * input.g + transform.m[1][2] * input.b,
++			transform.m[2][0] * input.r + transform.m[2][1] * input.g + transform.m[2][2] * input.b,
+ 		};
+ 	}
+ 
++	RGB rec709ToRec2020( const RGB &linearRec709 )
++	{
++		return applyLinearTransform( linearRec709, Rec709ToRec2020 );
++	}
++
+ 	double pqEncodeNits( double nits )
+ 	{
+ 		// SMPTE ST 2084 perceptual quantizer, absolute luminance in cd/m2.
+@@ -158,12 +161,18 @@ namespace gamescope::autohdr
+ 		return finite( mapped ) ? std::optional<RGB>{ bounded( mapped, config.targetNits ) } : std::nullopt;
+ 	}
+ 
+-	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedRec709, const Config &config )
++	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedSource, const Config &config,
++		const LinearTransform &sourceToRec2020 )
+ 	{
+-		const RGB decoded = srgbDecode( { encodedRec709.r, encodedRec709.g, encodedRec709.b } );
+-		const auto mapped = efficientInverseToneMap( rec709ToRec2020( decoded ), config );
++		const RGB decoded = srgbDecode( { encodedSource.r, encodedSource.g, encodedSource.b } );
++		const auto mapped = efficientInverseToneMap( applyLinearTransform( decoded, sourceToRec2020 ), config );
+ 		if ( !mapped )
+ 			return std::nullopt;
+-		return RGBA{ mapped->r, mapped->g, mapped->b, encodedRec709.a };
++		return RGBA{ mapped->r, mapped->g, mapped->b, encodedSource.a };
++	}
++
++	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedRec709, const Config &config )
++	{
++		return convertSRGBToHDRNits( encodedRec709, config, Rec709ToRec2020 );
+ 	}
+ }
+diff --git a/src/AutoHDRColor.h b/src/AutoHDRColor.h
+index ad80b9b756a7229c2d3057a40be9a63d685aa261..9ce03ba3f6a2284ec915666f7c6adbc00745f2b4 100644
+--- a/src/AutoHDRColor.h
++++ b/src/AutoHDRColor.h
+@@ -21,6 +21,17 @@ namespace gamescope::autohdr
+ 		double a;
+ 	};
+ 
++	struct LinearTransform
++	{
++		double m[3][3];
++	};
++
++	inline constexpr LinearTransform Rec709ToRec2020 = {{
++		{ 0.627403895934699, 0.329283038377883, 0.043313065687418 },
++		{ 0.069097289358232, 0.919540395075459, 0.011362315566309 },
++		{ 0.016391438875150, 0.088013307877226, 0.895595253247624 },
++	}};
++
+ 	struct Config
+ 	{
+ 		double sdrNits;
+@@ -31,6 +42,7 @@ namespace gamescope::autohdr
+ 
+ 	double srgbDecode( double encoded );
+ 	RGB srgbDecode( const RGB &encoded );
++	RGB applyLinearTransform( const RGB &linear, const LinearTransform &transform );
+ 	RGB rec709ToRec2020( const RGB &linearRec709 );
+ 
+ 	double pqEncodeNits( double nits );
+@@ -39,5 +51,7 @@ namespace gamescope::autohdr
+ 	double scRGBToNits( double scRGB );
+ 
+ 	std::optional<RGB> efficientInverseToneMap( const RGB &linearRec2020, const Config &config );
++	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedSource, const Config &config,
++		const LinearTransform &sourceToRec2020 );
+ 	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedRec709, const Config &config );
+ }
+diff --git a/src/color_helpers.cpp b/src/color_helpers.cpp
+index 64430a5f0c08863cb88857d1c98e5ac19a3669eb..f18fca78d28ec9756051eb87446712ab0e0f295a 100644
+--- a/src/color_helpers.cpp
++++ b/src/color_helpers.cpp
+@@ -74,6 +74,14 @@ glm::mat3 normalised_primary_matrix( const primaries_t & rgbPrimaries, const glm
+     return matPrimaries * whiteScale;
+ }
+ 
++glm::mat3 colorimetryConversionMatrix( const displaycolorimetry_t & source,
++    const displaycolorimetry_t & dest )
++{
++    const glm::mat3 xyzFromSource = normalised_primary_matrix( source.primaries, source.white, 1.f );
++    const glm::mat3 xyzFromDest = normalised_primary_matrix( dest.primaries, dest.white, 1.f );
++    return glm::inverse( xyzFromDest ) * xyzFromSource;
++}
++
+ glm::mat3 chromatic_adaptation_matrix( const glm::vec3 & sourceWhiteXYZ, const glm::vec3 & destWhiteXYZ,
+     EChromaticAdaptationMethod eMethod )
+ {
+@@ -724,8 +732,7 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
+         glm::mat3 xyz_from_dest = normalised_primary_matrix( dest.primaries, dest.white, 1.f );
+         glm::mat3 dest_from_xyz = glm::inverse( xyz_from_dest );
+ 
+-        glm::mat3 xyz_from_source = normalised_primary_matrix( source.primaries, source.white, 1.f );
+-        glm::mat3 dest_from_source = dest_from_xyz * xyz_from_source; // XYZ scaling for white point adjustment
++        glm::mat3 dest_from_source = colorimetryConversionMatrix( source, dest ); // XYZ scaling for white point adjustment
+ 
+         // Precalc night mode scalars & digital gain
+         // amount and saturation are overdetermined but we separate the two as they conceptually represent
+@@ -837,15 +844,14 @@ bool BIsWideGamut( const displaycolorimetry_t & nativeDisplayOutput )
+ void buildSDRColorimetry( displaycolorimetry_t * pColorimetry, colormapping_t *pMapping,
+ 	float flSDRGamutWideness, const displaycolorimetry_t & nativeDisplayOutput  )
+ {
++    *pColorimetry = effectiveSDRColorimetry( flSDRGamutWideness, nativeDisplayOutput );
++
+     if ( BIsWideGamut( nativeDisplayOutput) )
+     {
+         // If not set, make it native.
+         if (flSDRGamutWideness < 0 )
+             flSDRGamutWideness = 1.0f;
+ 
+-        displaycolorimetry_t r709NativeWhite = displaycolorimetry_709;
+-        r709NativeWhite.white = nativeDisplayOutput.white;
+-
+         // 0.0: 709
+         // 1.0: Native
+         colormapping_t noRemap;
+@@ -854,7 +860,6 @@ void buildSDRColorimetry( displaycolorimetry_t * pColorimetry, colormapping_t *p
+         noRemap.blendAmountMin = 0.0f;
+         noRemap.blendAmountMax = 0.0f;
+         *pMapping = noRemap;
+-        *pColorimetry = lerp( r709NativeWhite, nativeDisplayOutput, flSDRGamutWideness );
+     }
+     else
+     {
+@@ -883,24 +888,45 @@ void buildSDRColorimetry( displaycolorimetry_t * pColorimetry, colormapping_t *p
+         partialRemap.blendAmountMin = 0.0f;
+         partialRemap.blendAmountMax = 0.25;
+ 
+-        displaycolorimetry_t wideGamutNativeWhite = displaycolorimetry_widegamutgeneric;
+-        wideGamutNativeWhite.white = nativeDisplayOutput.white;
+-
+         if ( flSDRGamutWideness < 0.5f )
+         {
+-            float t = cfit( flSDRGamutWideness, 0.f, 0.5f, 0.0f, 1.0f );
+-            *pColorimetry = lerp( nativeDisplayOutput, wideGamutNativeWhite, t );
+             *pMapping = smoothRemap;
+         }
+         else
+         {
+             float t = cfit( flSDRGamutWideness, 0.5f, 1.0f, 0.0f, 1.0f );
+-            *pColorimetry = wideGamutNativeWhite;
+             *pMapping = lerp( smoothRemap, partialRemap, t );
+         }
+     }
+ }
+ 
++displaycolorimetry_t effectiveSDRColorimetry( float flSDRGamutWideness,
++    const displaycolorimetry_t & nativeDisplayOutput )
++{
++    if ( BIsWideGamut( nativeDisplayOutput ) )
++    {
++        if ( flSDRGamutWideness < 0.f )
++            flSDRGamutWideness = 1.f;
++
++        displaycolorimetry_t r709NativeWhite = displaycolorimetry_709;
++        r709NativeWhite.white = nativeDisplayOutput.white;
++        return lerp( r709NativeWhite, nativeDisplayOutput, flSDRGamutWideness );
++    }
++
++    if ( flSDRGamutWideness < 0.f )
++        flSDRGamutWideness = 0.f;
++
++    displaycolorimetry_t wideGamutNativeWhite = displaycolorimetry_widegamutgeneric;
++    wideGamutNativeWhite.white = nativeDisplayOutput.white;
++    if ( flSDRGamutWideness < 0.5f )
++    {
++        const float t = cfit( flSDRGamutWideness, 0.f, 0.5f, 0.f, 1.f );
++        return lerp( nativeDisplayOutput, wideGamutNativeWhite, t );
++    }
++
++    return wideGamutNativeWhite;
++}
++
+ void buildPQColorimetry( displaycolorimetry_t * pColorimetry, colormapping_t *pMapping, const displaycolorimetry_t & nativeDisplayOutput )
+ {
+     *pColorimetry = displaycolorimetry_2020;
+diff --git a/src/color_helpers.h b/src/color_helpers.h
+index cefa74e403e862ccb72f6858c09dc532732fdd94..f30c9a22687b672e4164b5eff07a6de8b38f15fd 100644
+--- a/src/color_helpers.h
++++ b/src/color_helpers.h
+@@ -313,6 +313,11 @@ enum EChromaticAdaptationMethod
+ glm::mat3 chromatic_adaptation_matrix( const glm::vec3 & sourceWhiteXYZ, const glm::vec3 & destWhiteXYZ,
+ 	EChromaticAdaptationMethod eMethod );
+ 
++// Convert linear RGB values expressed in source primaries to destination primaries.
++// This is the same absolute-colorimetric primary conversion used by the 3D LUT path.
++glm::mat3 colorimetryConversionMatrix( const displaycolorimetry_t & source,
++	const displaycolorimetry_t & dest );
++
+ struct lut1d_t
+ {
+ 	int lutSize = 0;
+@@ -385,6 +390,9 @@ void calcColorTransform( lut1d_t * pShaper, int nLutSize1d,
+ // Build colorimetry and a gamut mapping for the given SDR configuration
+ // Note: the output colorimetry will use the native display's white point
+ // Only the color gamut will change
++displaycolorimetry_t effectiveSDRColorimetry( float flSDRGamutWideness,
++	const displaycolorimetry_t & nativeDisplayOutput );
++
+ void buildSDRColorimetry( displaycolorimetry_t * pColorimetry, colormapping_t *pMapping,
+ 	float flSDRGamutWideness, const displaycolorimetry_t & nativeDisplayOutput );
+ 
+diff --git a/src/mangoapp.cpp b/src/mangoapp.cpp
+index 83bdbfbc5bd054e6b0a76a5a1f8b0e4b7cd39b9a..16e1feb0990741315c0c50fc311f6ec4c24e2930 100644
+--- a/src/mangoapp.cpp
++++ b/src/mangoapp.cpp
+@@ -4,14 +4,12 @@
+ #include <cstring>
+ 
+ #include "steamcompmgr.hpp"
+-#include "AutoHDRRootProperties.h"
+ #include "refresh_rate.h"
+ #include "main.hpp"
+ 
+ static bool inited = false;
+ static int msgid = 0;
+ extern bool g_bAppWantsHDRCached;
+-extern bool g_bAutoHDRActiveCached;
+ extern uint32_t g_focusedBaseAppId;
+ 
+ struct mangoapp_msg_header {
+@@ -61,8 +59,7 @@ void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uin
+     mangoapp_msg_v1.outputWidth = g_nOutputWidth;
+     mangoapp_msg_v1.outputHeight = g_nOutputHeight;
+     mangoapp_msg_v1.displayRefresh = (uint16_t) gamescope::ConvertmHzToHz( g_nOutputRefresh );
+-    mangoapp_msg_v1.bAppWantsHDR = gamescope::autohdr::presentationWantsHDR(
+-        g_bAppWantsHDRCached, g_bAutoHDRActiveCached );
++    mangoapp_msg_v1.bAppWantsHDR = g_bAppWantsHDRCached;
+     mangoapp_msg_v1.bSteamFocused = g_focusedBaseAppId == 769;
+     memset(mangoapp_msg_v1.engineName, 0, sizeof(mangoapp_msg_v1.engineName));
+     std::shared_ptr<std::string> engine = focusWindow_engine;
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index c72c709c62f546f46e326b0071b963a20c6b861f..d8b8e37abecc7aefb34d723bc17c461c34d3646c 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1,6 +1,7 @@
+ // Initialize Vulkan and composite stuff with a compute queue
+ 
+ #include <cassert>
++#include <cstddef>
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <stdio.h>
+@@ -3780,6 +3781,7 @@ struct BlitPushData_t
+ 	vec2_t offset[k_nMaxLayers];
+ 	float opacity[k_nMaxLayers];
+ 	glm::mat3x4 ctm[k_nMaxLayers];
++	glm::mat3x4 autoHDRSourceTo2020;
+ 	uint32_t borderMask;
+ 	uint32_t frameId;
+ 	uint32_t blurRadius;
+@@ -3823,6 +3825,7 @@ struct BlitPushData_t
+ 				};
+ 			}
+ 		}
++		autoHDRSourceTo2020 = frameInfo->autoHDRSourceTo2020;
+ 
+ 		borderMask = frameInfo->borderMask();
+ 		frameId = s_frameId++;
+@@ -3846,6 +3849,12 @@ struct BlitPushData_t
+ 			0, 1, 0, 0,
+ 			0, 0, 1, 0
+ 		};
++		autoHDRSourceTo2020 = glm::mat3x4
++		{
++			1, 0, 0, 0,
++			0, 1, 0, 0,
++			0, 0, 1, 0
++		};
+ 		borderMask = 0;
+ 		frameId = s_frameId;
+ 
+@@ -3914,6 +3923,7 @@ struct RcasPushData_t
+ 	vec2_t u_offset[k_nMaxLayers - 1];
+ 	float u_opacity[k_nMaxLayers];
+ 	glm::mat3x4 ctm[k_nMaxLayers];
++	glm::mat3x4 autoHDRSourceTo2020;
+ 	uint32_t u_borderMask;
+ 	uint32_t u_frameId;
+ 	uint32_t u_c1;
+@@ -3965,6 +3975,7 @@ struct RcasPushData_t
+ 
+ 			u_opacity[i] = frameInfo->layers[i].opacity;
+ 		}
++		autoHDRSourceTo2020 = frameInfo->autoHDRSourceTo2020;
+ 
+ 		u_linearToNits = g_flInternalDisplayBrightnessNits;
+ 		u_nitsToLinear = 1.0f / g_flInternalDisplayBrightnessNits;
+@@ -3979,6 +3990,16 @@ struct RcasPushData_t
+ 	}
+ };
+ 
++static_assert( sizeof( glm::mat3x4 ) == sizeof( float ) * 12 );
++static_assert( offsetof( BlitPushData_t, autoHDRSourceTo2020 ) ==
++	offsetof( BlitPushData_t, ctm ) + sizeof( BlitPushData_t::ctm ) );
++static_assert( offsetof( BlitPushData_t, borderMask ) ==
++	offsetof( BlitPushData_t, autoHDRSourceTo2020 ) + sizeof( glm::mat3x4 ) );
++static_assert( offsetof( RcasPushData_t, autoHDRSourceTo2020 ) ==
++	offsetof( RcasPushData_t, ctm ) + sizeof( RcasPushData_t::ctm ) );
++static_assert( offsetof( RcasPushData_t, u_borderMask ) ==
++	offsetof( RcasPushData_t, autoHDRSourceTo2020 ) + sizeof( glm::mat3x4 ) );
++
+ struct NisPushData_t
+ {
+ 	NISConfig nisConfig;
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+index 76e29a71c8807128de1b295f20099c7dff4ba2a2..68f3570a0cb47ee84719afe43f3bbe258af2b2c1 100644
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -292,6 +292,12 @@ struct FrameInfo_t
+ 	bool allowVRR;
+ 	bool applyOutputColorMgmt; // drm only
+ 	EOTF outputEncodingEOTF;
++	glm::mat3x4 autoHDRSourceTo2020 = glm::mat3x4
++	{
++		1, 0, 0, 0,
++		0, 1, 0, 0,
++		0, 0, 1, 0
++	};
+ 
+ 	int layerCount;
+ 	uint32_t autoHDRLayerMask = 0;
+diff --git a/src/shaders/blit_push_data.h b/src/shaders/blit_push_data.h
+index caff0f3781ab38c14587b40fd7a5ea62617ca035..7504d71c73d25d5f4e6a3f4f33facb88ac3ab1b6 100644
+--- a/src/shaders/blit_push_data.h
++++ b/src/shaders/blit_push_data.h
+@@ -4,6 +4,7 @@ uniform layers_t {
+     vec2 u_offset[VKR_MAX_LAYERS];
+     float u_opacity[VKR_MAX_LAYERS];
+     mat3x4 u_ctm[VKR_MAX_LAYERS];
++    mat3x4 u_autoHDRSourceTo2020;
+     uint u_borderMask;
+     uint u_frameId;
+     uint u_blur_radius;
+diff --git a/src/shaders/colorimetry.h b/src/shaders/colorimetry.h
+index 43b9cf8c657fde1faffd095ff49174f07b6456f0..36e34393899057945a3fd3530f0ef022889d72b3 100644
+--- a/src/shaders/colorimetry.h
++++ b/src/shaders/colorimetry.h
+@@ -186,15 +186,6 @@ bool finite_color(vec3 color)
+     return !any(isnan(color)) && !any(isinf(color));
+ }
+ 
+-vec3 rec709_to_rec2020(vec3 linear_rec709)
+-{
+-    vec3 color = bounded_color(linear_rec709, 1.0f);
+-    return color * mat3(
+-        0.627403895934699f, 0.329283038377883f, 0.043313065687418f,
+-        0.069097289358232f, 0.919540395075459f, 0.011362315566309f,
+-        0.016391438875150f, 0.088013307877226f, 0.895595253247624f);
+-}
+-
+ // Conservative global highlight expansion following the design guidance in
+ // Rep. ITU-R BT.2446-1 section 5.1. The independently derived quadratic blend
+ // preserves display-light shadows and mid-tones and is C1 at the highlight knee.
+diff --git a/src/shaders/composite.h b/src/shaders/composite.h
+index d511c3ce017f077f0d4dc66c8197769cdf5d329f..3aba0328a061376f8e293ca49bc97826be204910 100644
+--- a/src/shaders/composite.h
++++ b/src/shaders/composite.h
+@@ -83,7 +83,7 @@ vec3 apply_layer_color_mgmt(vec3 color, uint layer, uint colorspace) {
+     bool auto_hdr_enabled = layer < 32u && (c_auto_hdr_layer_mask & (1u << layer)) != 0u;
+     if (auto_hdr_enabled && auto_hdr_eligible)
+     {
+-        color = rec709_to_rec2020(color);
++        color = (vec4(bounded_color(color, 1.0f), 1.0f) * u_autoHDRSourceTo2020).rgb;
+         color = nitsToScRGB(efficient_inverse_tonemapping(color, u_itmSdrNits, u_itmTargetNits));
+         // Values use scRGB luminance units, but the mapped primaries are BT.2020.
+         colorspace = colorspace_pq;
+diff --git a/src/shaders/cs_composite_rcas.comp b/src/shaders/cs_composite_rcas.comp
+index 4da24cafcc5d6e2a9364427bd3d667e071416378..9c08e7c2a475a8e641f9a4bf4a9141adee3f6cc5 100644
+--- a/src/shaders/cs_composite_rcas.comp
++++ b/src/shaders/cs_composite_rcas.comp
+@@ -17,6 +17,7 @@ uniform layers_t {
+     vec2 u_offset[VKR_MAX_LAYERS - 1];
+     float u_opacity[VKR_MAX_LAYERS];
+     mat3x4 u_ctm[VKR_MAX_LAYERS];
++    mat3x4 u_autoHDRSourceTo2020;
+     uint u_borderMask;
+     uint u_frameId;
+     uint u_c1;
+@@ -109,4 +110,3 @@ void main()
+     pos.x -= 8u;
+     rcasComposite(pos);
+ }
+-
+diff --git a/src/shaders/cs_gaussian_blur_horizontal.comp b/src/shaders/cs_gaussian_blur_horizontal.comp
+index 2037f1ce3342d8d736226d0009b228b4652674d1..cccb14b80bb2e5b54587e558c0907de693705cbf 100644
+--- a/src/shaders/cs_gaussian_blur_horizontal.comp
++++ b/src/shaders/cs_gaussian_blur_horizontal.comp
+@@ -16,6 +16,7 @@ uniform layers_t {
+     vec2 u_offset[VKR_MAX_LAYERS];
+     float u_opacity[VKR_MAX_LAYERS];
+     mat3x4 u_ctm[VKR_MAX_LAYERS];
++    mat3x4 u_autoHDRSourceTo2020;
+     uint u_borderMask;
+     uint u_frameId;
+     uint u_blur_radius;
+diff --git a/src/shaders/cs_rgb_to_nv12.comp b/src/shaders/cs_rgb_to_nv12.comp
+index 872b84ef4727838bbcac97277ddfd0c24c55abf0..f5c6fb9c008c4dc2faf115bdbc3878e212c96f83 100644
+--- a/src/shaders/cs_rgb_to_nv12.comp
++++ b/src/shaders/cs_rgb_to_nv12.comp
+@@ -22,6 +22,7 @@ const float u_linearToNits = 400.0f;
+ const float u_nitsToLinear = 1.0f / 100.0f;
+ const float u_itmSdrNits = 100.f;
+ const float u_itmTargetNits = 1000.f;
++const mat3x4 u_autoHDRSourceTo2020 = mat3x4(1.0f);
+ 
+ layout(binding = 0, scalar)
+ uniform layers_t {
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index a139d30d31ea65ed84e115a2b92214ca5fece9db..ac2c0712a7fa8f58144a99894e00a6a1e29ab702 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -172,6 +172,13 @@ extern float g_flHDRItmTargetNits;
+ uint64_t g_lastWinSeq = 0;
+ 
+ static std::shared_ptr<gamescope::BackendBlob> s_scRGB709To2020Matrix;
++static glm::mat3x4 s_autoHDRSourceTo2020Matrix
++{
++	1, 0, 0, 0,
++	0, 1, 0, 0,
++	0, 0, 1, 0
++};
++static bool s_autoHDRSourceTo2020Valid = false;
+ 
+ std::string clipboard;
+ std::string primarySelection;
+@@ -332,10 +339,17 @@ static void
+ create_color_mgmt_luts(
+ 	const gamescope_color_mgmt_t& newColorMgmt,
+ 	gamescope_color_mgmt_luts outColorMgmtLuts[ EOTF_Count ],
+-	bool bTraditionalHDROutput )
++	bool bTraditionalHDROutput,
++	glm::mat3 *pAutoHDRSourceTo2020 = nullptr )
+ {
+ 	const displaycolorimetry_t& displayColorimetry = newColorMgmt.displayColorimetry;
+ 	const displaycolorimetry_t& outputEncodingColorimetry = newColorMgmt.outputEncodingColorimetry;
++	displaycolorimetry_t sdrInputColorimetry{};
++	colormapping_t sdrColorMapping{};
++	buildSDRColorimetry( &sdrInputColorimetry, &sdrColorMapping,
++		newColorMgmt.sdrGamutWideness, displayColorimetry );
++	if ( pAutoHDRSourceTo2020 )
++		*pAutoHDRSourceTo2020 = colorimetryConversionMatrix( sdrInputColorimetry, displaycolorimetry_2020 );
+ 
+ 	for ( uint32_t nInputEOTF = 0; nInputEOTF < EOTF_Count; nInputEOTF++ )
+ 	{
+@@ -389,7 +403,8 @@ create_color_mgmt_luts(
+ 				// The final display colorimetry is used to build the output mapping, as we want a gamut-aware handling
+ 				// for sdrGamutWideness indepdendent of the output encoding (for SDR data), and when mapping SDR -> PQ output
+ 				// we only want to utilize a portion of the gamut the actual display can reproduce
+-				buildSDRColorimetry( &inputColorimetry, &colorMapping, newColorMgmt.sdrGamutWideness, displayColorimetry );
++				inputColorimetry = sdrInputColorimetry;
++				colorMapping = sdrColorMapping;
+ 			}
+ 			else if ( inputEOTF == EOTF_PQ )
+ 			{
+@@ -516,10 +531,19 @@ update_color_mgmt()
+ 
+ 	if (g_ColorMgmt.pending.enabled)
+ 	{
+-		create_color_mgmt_luts(g_ColorMgmt.pending, g_ColorMgmtLuts, bTraditionalHDROutput);
++		glm::mat3 autoHDRSourceTo2020{};
++		create_color_mgmt_luts( g_ColorMgmt.pending, g_ColorMgmtLuts, bTraditionalHDROutput,
++			&autoHDRSourceTo2020 );
++		s_autoHDRSourceTo2020Valid = true;
++		for ( int column = 0; column < 3; column++ )
++			for ( int row = 0; row < 3; row++ )
++				s_autoHDRSourceTo2020Valid &= std::isfinite( autoHDRSourceTo2020[column][row] );
++		if ( s_autoHDRSourceTo2020Valid )
++			s_autoHDRSourceTo2020Matrix = glm::mat3x4( glm::transpose( autoHDRSourceTo2020 ) );
+ 	}
+ 	else
+ 	{
++		s_autoHDRSourceTo2020Valid = false;
+ 		for ( uint32_t i = 0; i < EOTF_Count; i++ )
+ 			g_ColorMgmtLuts[i].reset();
+ 	}
+@@ -2558,7 +2582,8 @@ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendC
+ 		g_ColorMgmtLuts[EOTF_Gamma22].vk_lut3d &&
+ 		g_ColorMgmtLuts[EOTF_PQ].HasLuts() &&
+ 		g_ColorMgmtLuts[EOTF_PQ].vk_lut1d &&
+-		g_ColorMgmtLuts[EOTF_PQ].vk_lut3d;
++		g_ColorMgmtLuts[EOTF_PQ].vk_lut3d &&
++		s_autoHDRSourceTo2020Valid;
+ 	input.steamOrSystemUIFocused = baseWindow &&
+ 		( window_is_steam( baseWindow ) ||
+ 		  baseWindow->bIsSteamPid ||
+@@ -2584,6 +2609,7 @@ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendC
+ 
+ 	const gamescope::autohdr::PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
+ 	frameInfo->autoHDRLayerMask = result.layerMask;
++	frameInfo->autoHDRSourceTo2020 = s_autoHDRSourceTo2020Matrix;
+ 	g_bAutoHDRActive = gamescope::autohdr::activeFromLayerMask( result.layerMask );
+ 
+ 	static bool logged = false;
+@@ -9063,7 +9089,9 @@ steamcompmgr_main(int argc, char **argv)
+ 					app_hdr_metadata = g_HeldCommits[HELD_COMMIT_BASE]->feedback->hdr_metadata_blob;
+ 			}
+ 
+-			bool app_wants_hdr = ColorspaceIsHDR( current_app_colorspace );
++			const bool native_app_wants_hdr = ColorspaceIsHDR( current_app_colorspace );
++			const bool app_wants_hdr = gamescope::autohdr::presentationWantsHDR(
++				native_app_wants_hdr, g_bAutoHDRActiveCached );
+ 
+ 			if ( app_wants_hdr != g_bAppWantsHDRCached )
+ 			{
+diff --git a/tests/meson.build b/tests/meson.build
+index 49b185388d3aa3f8bdd0ca3b4ac8bd9d71a83d71..d6b1868093621c24a96c0f9006989000ed00cab1 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -32,6 +32,15 @@ test_auto_hdr_color = executable(
+ )
+ test('auto-hdr-color', test_auto_hdr_color)
+ 
++test_auto_hdr_gamut = executable(
++	'test_auto_hdr_gamut',
++	['test_auto_hdr_gamut.cpp', '../src/color_helpers.cpp'],
++	include_directories: ['../src'],
++	dependencies: [glm_dep],
++	cpp_args: gamescope_cpp_args + ['-fno-fast-math'],
++)
++test('auto-hdr-gamut', test_auto_hdr_gamut)
++
+ test_auto_hdr_policy = executable(
+ 	'test_auto_hdr_policy',
+ 	['test_auto_hdr_policy.cpp', '../src/AutoHDRPolicy.cpp'],
+diff --git a/tests/test_auto_hdr_color.cpp b/tests/test_auto_hdr_color.cpp
+index df851c5a15dc9a3b3bd8ec8d8781bb65260433d3..3c22b93d43ec969b21fe59289f821282ddb7ffc3 100644
+--- a/tests/test_auto_hdr_color.cpp
++++ b/tests/test_auto_hdr_color.cpp
+@@ -64,6 +64,10 @@ int main()
+ 	near( red2020.r, 0.627403895934699, 1e-15, "Rec.709 red matrix R" );
+ 	near( red2020.g, 0.069097289358232, 1e-15, "Rec.709 red matrix G" );
+ 	near( red2020.b, 0.016391438875150, 1e-15, "Rec.709 red matrix B" );
++	const RGB red2020Generic = applyLinearTransform( { 1.0, 0.0, 0.0 }, Rec709ToRec2020 );
++	near( red2020Generic.r, red2020.r, 0.0, "generic source transform matches Rec.709 R" );
++	near( red2020Generic.g, red2020.g, 0.0, "generic source transform matches Rec.709 G" );
++	near( red2020Generic.b, red2020.b, 0.0, "generic source transform matches Rec.709 B" );
+ 
+ 	near( pqEncodeNits( 0.0 ), 7.30955902578397e-7, 1e-18, "PQ code for zero nits" );
+ 	near( pqEncodeNits( 80.0 ), 0.4858567653886785, 1e-14, "PQ code for 80 nits" );
+@@ -192,13 +196,22 @@ int main()
+ 
+ 	const RGBA encodedInput{ 0.5, 0.25, 0.75, 0.37123456789 };
+ 	const auto converted = convertSRGBToHDRNits( encodedInput, odinConfig );
++	const auto convertedExplicit709 = convertSRGBToHDRNits( encodedInput, odinConfig, Rec709ToRec2020 );
+ 	check( converted.has_value(), "RGBA conversion accepted" );
++	check( convertedExplicit709.has_value(), "explicit Rec.709 RGBA conversion accepted" );
+ 	if ( converted )
+ 	{
+ 		near( converted->a, encodedInput.a, 0.0, "alpha preserved exactly" );
+ 		check( finiteAndBounded( { converted->r, converted->g, converted->b }, odinConfig.targetNits ),
+ 			"RGBA output finite and bounded" );
+ 	}
++	if ( converted && convertedExplicit709 )
++	{
++		near( convertedExplicit709->r, converted->r, 0.0, "default Rec.709 conversion red" );
++		near( convertedExplicit709->g, converted->g, 0.0, "default Rec.709 conversion green" );
++		near( convertedExplicit709->b, converted->b, 0.0, "default Rec.709 conversion blue" );
++		near( convertedExplicit709->a, converted->a, 0.0, "default Rec.709 conversion alpha" );
++	}
+ 
+ 	const auto hostile = convertSRGBToHDRNits(
+ 		{ -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), 0.5 },
+diff --git a/tests/test_auto_hdr_gamut.cpp b/tests/test_auto_hdr_gamut.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..cae8d72b6fb268d61c8174e6478d581d44154aec
+--- /dev/null
++++ b/tests/test_auto_hdr_gamut.cpp
+@@ -0,0 +1,112 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "color_helpers.h"
++
++#include <cmath>
++#include <cstdlib>
++#include <iostream>
++#include <string_view>
++
++namespace
++{
++	int failures = 0;
++
++	void check( bool condition, std::string_view message )
++	{
++		if ( condition )
++			return;
++		std::cerr << "FAIL: " << message << '\n';
++		failures++;
++	}
++
++	void near( float actual, float expected, float tolerance, std::string_view message )
++	{
++		check( std::isfinite( actual ) && std::abs( actual - expected ) <= tolerance, message );
++	}
++
++	void near( const glm::vec2 &actual, const glm::vec2 &expected, float tolerance, std::string_view message )
++	{
++		near( actual.x, expected.x, tolerance, message );
++		near( actual.y, expected.y, tolerance, message );
++	}
++
++	void near( const glm::vec3 &actual, const glm::vec3 &expected, float tolerance, std::string_view message )
++	{
++		near( actual.x, expected.x, tolerance, message );
++		near( actual.y, expected.y, tolerance, message );
++		near( actual.z, expected.z, tolerance, message );
++	}
++
++	void checkColorimetry( const displaycolorimetry_t &actual, const displaycolorimetry_t &expected,
++		std::string_view message )
++	{
++		near( actual.primaries.r, expected.primaries.r, 1e-6f, message );
++		near( actual.primaries.g, expected.primaries.g, 1e-6f, message );
++		near( actual.primaries.b, expected.primaries.b, 1e-6f, message );
++		near( actual.white, expected.white, 1e-6f, message );
++	}
++
++	glm::mat3 rgbToXYZ( const displaycolorimetry_t &colorimetry )
++	{
++		auto xyToXYZ = []( const glm::vec2 &xy )
++		{
++			return glm::vec3( xy.x / xy.y, 1.f, ( 1.f - xy.x - xy.y ) / xy.y );
++		};
++		const glm::mat3 primaries(
++			xyToXYZ( colorimetry.primaries.r ),
++			xyToXYZ( colorimetry.primaries.g ),
++			xyToXYZ( colorimetry.primaries.b ) );
++		const glm::vec3 scale = glm::inverse( primaries ) * xyToXYZ( colorimetry.white );
++		return primaries * glm::mat3(
++			scale.x, 0.f, 0.f,
++			0.f, scale.y, 0.f,
++			0.f, 0.f, scale.z );
++	}
++
++	void checkSourceContinuity( const displaycolorimetry_t &source, const glm::vec3 &linearSource,
++		std::string_view message )
++	{
++		const glm::mat3 sourceTo2020 = colorimetryConversionMatrix( source, displaycolorimetry_2020 );
++		const glm::vec3 sourceXYZ = rgbToXYZ( source ) * linearSource;
++		const glm::vec3 convertedXYZ = k_xyz_from_2020 * ( sourceTo2020 * linearSource );
++		near( convertedXYZ, sourceXYZ, 2e-6f, message );
++	}
++}
++
++int main()
++{
++	// The live Odin 3 profile is native P3-like. Default wideness must therefore
++	// preserve the source colors the normal SDR-on-HDR LUT interprets as native.
++	const displaycolorimetry_t odinNativeP3
++	{
++		.primaries = {
++			{ 0.6800f, 0.3200f },
++			{ 0.2650f, 0.6900f },
++			{ 0.1500f, 0.0600f },
++		},
++		.white = { 0.3127f, 0.3290f },
++	};
++	const displaycolorimetry_t odinEffective = effectiveSDRColorimetry( -1.f, odinNativeP3 );
++	checkColorimetry( odinEffective, odinNativeP3, "Odin default SDR source remains native P3" );
++	checkSourceContinuity( odinEffective, { 0.82f, 0.24f, 0.07f },
++		"Odin native-P3 source is continuous through BT.2020 conversion" );
++
++	// A Rec.709-native output keeps the historical Rec.709 default and matrix.
++	const displaycolorimetry_t rec709Effective = effectiveSDRColorimetry( -1.f, displaycolorimetry_709 );
++	checkColorimetry( rec709Effective, displaycolorimetry_709, "Rec.709 default SDR source remains Rec.709" );
++	const glm::mat3 default709To2020 = colorimetryConversionMatrix( rec709Effective, displaycolorimetry_2020 );
++	for ( int column = 0; column < 3; column++ )
++		near( default709To2020[column], k_2020_from_709[column], 1e-6f,
++			"Rec.709 default uses canonical BT.2020 conversion" );
++	checkSourceContinuity( rec709Effective, { 0.11f, 0.53f, 0.91f },
++		"Rec.709 source is continuous through BT.2020 conversion" );
++
++	if ( failures != 0 )
++	{
++		std::cerr << failures << " Auto HDR gamut continuity test(s) failed\n";
++		return EXIT_FAILURE;
++	}
++
++	std::cout << "Auto HDR gamut continuity tests passed\n";
++	return EXIT_SUCCESS;
++}

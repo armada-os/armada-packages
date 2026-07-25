@@ -1,0 +1,351 @@
+From 212ffb91e06d39be6e0e04d34de98327ece12132 Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Fri, 24 Jul 2026 00:44:55 -0400
+Subject: [PATCH] autohdr: use quality mode when available
+
+---
+ src/AutoHDRRootProperties.h             | 41 +++++++++---
+ src/main.cpp                            |  2 -
+ src/steamcompmgr.cpp                    | 84 ++++++++++++++++---------
+ tests/test_auto_hdr_root_properties.cpp | 82 +++++++++++++++++++-----
+ 4 files changed, 151 insertions(+), 58 deletions(-)
+
+diff --git a/src/AutoHDRRootProperties.h b/src/AutoHDRRootProperties.h
+index e0139549..c61a84c5 100644
+--- a/src/AutoHDRRootProperties.h
++++ b/src/AutoHDRRootProperties.h
+@@ -23,12 +23,35 @@ namespace gamescope::autohdr
+ 		HighQuality = 2,
+ 	};
+ 
+-	inline constexpr uint32_t SupportedModes =
+-		uint32_t( Mode::Efficient ) | uint32_t( Mode::HighQuality );
++	constexpr uint32_t supportedModesForCapabilities( bool highQualitySupported )
++	{
++		return uint32_t( highQualitySupported
++			? Mode::HighQuality
++			: Mode::Efficient );
++	}
++
++	constexpr Mode requestedModeForCapabilities( bool highQualitySupported )
++	{
++		return highQualitySupported
++			? Mode::HighQuality
++			: Mode::Efficient;
++	}
++
++	constexpr Mode requestedModeForPropertyWrite(
++		uint32_t,
++		bool highQualitySupported )
++	{
++		return requestedModeForCapabilities( highQualitySupported );
++	}
+ 
+-	constexpr Mode sanitizeRequestedMode( uint32_t value )
++	constexpr Mode effectiveMode(
++		bool active,
++		Mode requestedMode,
++		bool highQualityEffective )
+ 	{
+-		return value == uint32_t( Mode::HighQuality )
++		if ( !active )
++			return Mode::Off;
++		return requestedMode == Mode::HighQuality && highQualityEffective
+ 			? Mode::HighQuality
+ 			: Mode::Efficient;
+ 	}
+@@ -45,18 +68,16 @@ namespace gamescope::autohdr
+ 
+ 	constexpr RootPropertyValues initialRootPropertyValues(
+ 		bool enabled,
+-		Mode requestedMode = Mode::Efficient,
+ 		bool highQualitySupported = false )
+ 	{
++		const Mode qualifiedRequestedMode =
++			requestedModeForCapabilities( highQualitySupported );
+ 		return {
+ 			1u,
+ 			enabled ? 1u : 0u,
+ 			0u,
+-			uint32_t( Mode::Efficient ) |
+-				( highQualitySupported
+-					? uint32_t( Mode::HighQuality )
+-					: 0u ),
+-			uint32_t( requestedMode ),
++			supportedModesForCapabilities( highQualitySupported ),
++			uint32_t( qualifiedRequestedMode ),
+ 			uint32_t( Mode::Off ),
+ 		};
+ 	}
+diff --git a/src/main.cpp b/src/main.cpp
+index 4e5d1e9b..5b2f7699 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -145,7 +145,6 @@ const struct option *gamescope_options = (struct option[]){
+ 	{ "hdr-enabled", no_argument, nullptr, 0 },
+ 	{ "hdr-sdr-content-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-enabled", no_argument, nullptr, 0 },
+-	{ "hdr-itm-mode", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-sdr-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-target-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-content-nits", required_argument, nullptr, 0 },
+@@ -214,7 +213,6 @@ const char usage[] =
+ 	"  --sdr-gamut-wideness           Set the 'wideness' of the gamut for SDR comment. 0 - 1.\n"
+ 	"  --hdr-sdr-content-nits         set the luminance of SDR content in nits. Default: 400 nits.\n"
+ 	"  --hdr-itm-enabled              enable SDR->HDR inverse tone mapping. only works for SDR input.\n"
+-	"  --hdr-itm-mode                 select efficient or high-quality inverse tone mapping. Default: efficient.\n"
+ 	"  --hdr-itm-sdr-nits             set the luminance of SDR content in nits used as the input for the inverse tone mapping process.\n"
+ 	"                                 Default: 100 nits, Max: 1000 nits\n"
+ 	"  --hdr-itm-target-nits          set the target luminace of the inverse tone mapping process.\n"
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 9e5a680a..b29d6fd6 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -494,7 +494,7 @@ bool g_bForceHDR10OutputDebug = false;
+ gamescope::ConVar<bool> cv_hdr_enabled{ "hdr_enabled", false, "Whether or not HDR is enabled if it is available." };
+ bool g_bHDRItmEnable = false;
+ gamescope::autohdr::Mode g_eAutoHDRMode =
+-	gamescope::autohdr::Mode::Efficient;
++	gamescope::autohdr::Mode::HighQuality;
+ bool g_bAutoHDRActive = false;
+ bool g_bAutoHDRActiveCached = false;
+ gamescope::autohdr::Mode g_eAutoHDREffectiveModeCached =
+@@ -6644,9 +6644,28 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+ 	}
+ 	if ( ev->atom == ctx->atoms.gamescopeHDRItmMode )
+ 	{
+-		g_eAutoHDRMode = gamescope::autohdr::sanitizeRequestedMode(
+-			get_prop( ctx, ctx->root, ctx->atoms.gamescopeHDRItmMode,
+-				uint32_t( gamescope::autohdr::Mode::Efficient ) ) );
++		const uint32_t propertyMode = get_prop(
++			ctx,
++			ctx->root,
++			ctx->atoms.gamescopeHDRItmMode,
++			UINT32_MAX );
++		g_eAutoHDRMode = gamescope::autohdr::requestedModeForPropertyWrite(
++			propertyMode,
++			vulkan_auto_hdr_adaptive_supported() );
++		const uint32_t selectedMode = uint32_t( g_eAutoHDRMode );
++		if ( propertyMode != selectedMode )
++		{
++			XChangeProperty(
++				ctx->dpy,
++				ctx->root,
++				ctx->atoms.gamescopeHDRItmMode,
++				XA_CARDINAL,
++				32,
++				PropModeReplace,
++				reinterpret_cast<const unsigned char *>(
++					&selectedMode ),
++				1 );
++		}
+ 		hasRepaint = true;
+ 	}
+ 	if ( ev->atom == ctx->atoms.gamescopeHDRItmSDRNits )
+@@ -8305,11 +8324,13 @@ void update_vrr_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush =
+ 
+ static void publish_initial_auto_hdr_atoms( xwayland_ctx_t *root_ctx )
+ {
++	const bool highQualitySupported = vulkan_auto_hdr_adaptive_supported();
++	g_eAutoHDRMode = gamescope::autohdr::requestedModeForCapabilities(
++		highQualitySupported );
+ 	const gamescope::autohdr::RootPropertyValues values =
+ 		gamescope::autohdr::initialRootPropertyValues(
+ 			g_bHDRItmEnable,
+-			g_eAutoHDRMode,
+-			vulkan_auto_hdr_adaptive_supported() );
++			highQualitySupported );
+ 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmSupported,
+ 		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.supported ), 1 );
+ 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmEnable,
+@@ -8611,18 +8632,6 @@ steamcompmgr_main(int argc, char **argv)
+ 					g_bForceHDR10OutputDebug = true;
+ 				} else if (strcmp(opt_name, "hdr-itm-enabled") == 0 || strcmp(opt_name, "hdr-itm-enable") == 0) {
+ 					g_bHDRItmEnable = true;
+-				} else if (strcmp(opt_name, "hdr-itm-mode") == 0) {
+-					if (strcmp(optarg, "high-quality") == 0)
+-						g_eAutoHDRMode = gamescope::autohdr::Mode::HighQuality;
+-					else if (strcmp(optarg, "efficient") == 0)
+-						g_eAutoHDRMode = gamescope::autohdr::Mode::Efficient;
+-					else
+-					{
+-						auto_hdr_log.errorf(
+-							"invalid --hdr-itm-mode '%s'; using efficient",
+-							optarg );
+-						g_eAutoHDRMode = gamescope::autohdr::Mode::Efficient;
+-					}
+ 				} else if (strcmp(opt_name, "sdr-gamut-wideness") == 0) {
+ 					g_ColorMgmt.pending.sdrGamutWideness = atof(optarg);
+ 				} else if (strcmp(opt_name, "hdr-sdr-content-nits") == 0) {
+@@ -9152,11 +9161,11 @@ steamcompmgr_main(int argc, char **argv)
+ 
+ 
+ 		{
++			const bool highQualitySupported =
++				vulkan_auto_hdr_adaptive_supported();
+ 			const uint32_t supportedAutoHDRModes =
+-				uint32_t( gamescope::autohdr::Mode::Efficient ) |
+-				( vulkan_auto_hdr_adaptive_supported()
+-					? uint32_t( gamescope::autohdr::Mode::HighQuality )
+-					: 0u );
++				gamescope::autohdr::supportedModesForCapabilities(
++					highQualitySupported );
+ 			if ( supportedAutoHDRModes !=
+ 				 g_uAutoHDRSupportedModesCached )
+ 			{
+@@ -9174,6 +9183,26 @@ steamcompmgr_main(int argc, char **argv)
+ 					supportedAutoHDRModes;
+ 				flush_root = true;
+ 			}
++			const gamescope::autohdr::Mode selectedRequestedMode =
++				gamescope::autohdr::requestedModeForCapabilities(
++					highQualitySupported );
++			if ( selectedRequestedMode != g_eAutoHDRMode )
++			{
++				g_eAutoHDRMode = selectedRequestedMode;
++				const uint32_t requestedMode =
++					uint32_t( g_eAutoHDRMode );
++				XChangeProperty(
++					root_ctx->dpy,
++					root_ctx->root,
++					root_ctx->atoms.gamescopeHDRItmMode,
++					XA_CARDINAL,
++					32,
++					PropModeReplace,
++					reinterpret_cast<const unsigned char *>(
++						&requestedMode ),
++					1 );
++				flush_root = true;
++			}
+ 			if ( g_bAutoHDRActive != g_bAutoHDRActiveCached )
+ 			{
+ 				const uint32_t active = g_bAutoHDRActive ? 1u : 0u;
+@@ -9183,13 +9212,10 @@ steamcompmgr_main(int argc, char **argv)
+ 				flush_root = true;
+ 			}
+ 			const gamescope::autohdr::Mode effectiveAutoHDRMode =
+-				!g_bAutoHDRActiveCached
+-					? gamescope::autohdr::Mode::Off
+-					: ( g_eAutoHDRMode ==
+-							gamescope::autohdr::Mode::HighQuality &&
+-						vulkan_auto_hdr_adaptive_effective() )
+-						? gamescope::autohdr::Mode::HighQuality
+-						: gamescope::autohdr::Mode::Efficient;
++				gamescope::autohdr::effectiveMode(
++					g_bAutoHDRActiveCached,
++					g_eAutoHDRMode,
++					vulkan_auto_hdr_adaptive_effective() );
+ 			if ( effectiveAutoHDRMode != g_eAutoHDREffectiveModeCached )
+ 			{
+ 				const uint32_t effective =
+diff --git a/tests/test_auto_hdr_root_properties.cpp b/tests/test_auto_hdr_root_properties.cpp
+index 22e995b4..f8b88208 100644
+--- a/tests/test_auto_hdr_root_properties.cpp
++++ b/tests/test_auto_hdr_root_properties.cpp
+@@ -32,38 +32,86 @@ int main()
+ 	check( EffectiveModeAtomName == "GAMESCOPE_HDR_ITM_EFFECTIVE_MODE",
+ 		"effective mode atom name" );
+ 
+-	const RootPropertyValues disabled = initialRootPropertyValues( false );
++	const RootPropertyValues disabled = initialRootPropertyValues( false, false );
+ 	check( disabled.supported == 1u, "support is always published" );
+ 	check( disabled.enabled == 0u, "disabled launch publishes disabled state" );
+ 	check( disabled.active == 0u, "launch feedback is inactive" );
+ 	check( disabled.supportedModes == uint32_t( Mode::Efficient ),
+ 		"Efficient is the conservative supported mode" );
+ 	check( disabled.requestedMode == uint32_t( Mode::Efficient ),
+-		"Efficient is the default requested mode" );
++		"unsupported capability defaults to Efficient" );
+ 	check( disabled.effectiveMode == uint32_t( Mode::Off ),
+ 		"disabled launch has Off effective mode" );
+ 
+-	const RootPropertyValues enabled = initialRootPropertyValues(
+-		true, Mode::HighQuality, true );
+-	check( enabled.supported == 1u, "enabled launch still publishes support" );
+-	check( enabled.enabled == 1u, "enabled launch publishes enabled state" );
+-	check( enabled.active == 0u, "enabled launch is inactive without an eligible layer" );
+-	check( enabled.supportedModes == SupportedModes,
+-		"runtime capability publishes both modes" );
+-	check( enabled.requestedMode == uint32_t( Mode::HighQuality ),
+-		"requested High Quality mode is published" );
+-	check( sanitizeRequestedMode( 0u ) == Mode::Efficient,
+-		"Off is controlled by enable and mode zero sanitizes to Efficient" );
+-	check( sanitizeRequestedMode( 99u ) == Mode::Efficient,
+-		"invalid mode sanitizes to Efficient" );
+-	check( sanitizeRequestedMode( 2u ) == Mode::HighQuality,
+-		"High Quality mode is accepted" );
++	const RootPropertyValues adaptive = initialRootPropertyValues( false, true );
++	check( adaptive.supported == 1u, "adaptive launch still publishes support" );
++	check( adaptive.enabled == 0u, "Auto HDR remains disabled by default" );
++	check( adaptive.active == 0u, "disabled adaptive launch is inactive" );
++	check( adaptive.supportedModes == uint32_t( Mode::HighQuality ),
++		"adaptive capability exposes only High Quality to users" );
++	check( adaptive.requestedMode == uint32_t( Mode::HighQuality ),
++		"adaptive capability publishes High Quality as requested default" );
++	check( adaptive.effectiveMode == uint32_t( Mode::Off ),
++		"disabled adaptive launch has Off effective mode" );
++	check( supportedModesForCapabilities( true ) ==
++			uint32_t( Mode::HighQuality ),
++		"adaptive capability advertises only High Quality" );
++	check( supportedModesForCapabilities( false ) ==
++			uint32_t( Mode::Efficient ),
++		"unsupported capability advertises only Efficient" );
++
++	const RootPropertyValues unsupported =
++		initialRootPropertyValues( true, false );
++	check( unsupported.enabled == 1u,
++		"enabled state is independent from quality capability" );
++	check( unsupported.supportedModes == uint32_t( Mode::Efficient ),
++		"unsupported capability advertises only Efficient" );
++	check( unsupported.requestedMode == uint32_t( Mode::Efficient ),
++		"unsupported startup selects the Efficient capability fallback" );
++	check( unsupported.effectiveMode == uint32_t( Mode::Off ),
++		"initial effective mode remains Off until eligible content is active" );
++
++	check( requestedModeForCapabilities( true ) ==
++			Mode::HighQuality,
++		"capable startup selects High Quality" );
++	check( requestedModeForCapabilities( false ) ==
++			Mode::Efficient,
++		"unsupported startup selects Efficient" );
++
++	for ( const uint32_t propertyWrite : { 0u, 1u, 2u, 99u, UINT32_MAX } )
++	{
++		check( requestedModeForPropertyWrite( propertyWrite, true ) ==
++				Mode::HighQuality,
++			"property writes cannot select Efficient on capable hardware" );
++		check( requestedModeForPropertyWrite( propertyWrite, false ) ==
++				Mode::Efficient,
++			"property writes retain Efficient as the capability fallback" );
++	}
++
++	check( effectiveMode( false, Mode::HighQuality, true ) == Mode::Off,
++		"disabled or inactive Auto HDR has Off effective mode" );
++	check( effectiveMode( true, Mode::HighQuality, true ) == Mode::HighQuality,
++		"active capable Auto HDR uses High Quality" );
++	check( effectiveMode( true, Mode::HighQuality, false ) == Mode::Efficient,
++		"shader failure falls back to Efficient without changing the request" );
++	check( effectiveMode( true, Mode::Efficient, false ) == Mode::Efficient,
++		"missing adaptive capability uses internal Efficient" );
++	check( requestedModeForCapabilities( true ) == Mode::HighQuality &&
++			effectiveMode( false, requestedModeForCapabilities( true ), true ) ==
++				Mode::Off &&
++			effectiveMode( true, requestedModeForCapabilities( true ), true ) ==
++				Mode::HighQuality,
++		"toggling Auto HDR preserves the High Quality request" );
+ 	check( !activeFromLayerMask( 0u ), "zero effective layer mask is inactive" );
+ 	check( activeFromLayerMask( 0x00000001u ), "first effective layer is active" );
+ 	check( activeFromLayerMask( 0x80000000u ), "highest effective layer is active" );
+ 
+ 	check( !presentationWantsHDR( false, false ), "SDR presentation has no HDR badge" );
+ 	check( presentationWantsHDR( true, false ), "native HDR presentation has HDR badge" );
++	check( presentationWantsHDR(
++			true,
++			effectiveMode( false, Mode::HighQuality, true ) != Mode::Off ),
++		"native HDR bypass remains HDR when Auto HDR is inactive" );
+ 	check( presentationWantsHDR( false, true ), "Auto HDR presentation has HDR badge" );
+ 	check( presentationWantsHDR( true, true ), "combined HDR presentation has HDR badge" );
+ 
+-- 
+2.51.0.windows.2
+

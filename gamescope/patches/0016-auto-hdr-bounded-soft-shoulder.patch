@@ -1,0 +1,715 @@
+From 505730d365342c067086e470c7a77d2da3dde75b Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Thu, 23 Jul 2026 00:18:18 -0400
+Subject: [PATCH] tune(auto-hdr): bound highlight response
+
+---
+ src/AutoHDRColor.cpp                         |  50 ++++-
+ src/AutoHDRColor.h                           |   3 +
+ src/main.cpp                                 |   3 +
+ src/rendervulkan.cpp                         |  30 +++
+ src/shaders/blit_push_data.h                 |   1 +
+ src/shaders/colorimetry.h                    |  48 ++++-
+ src/shaders/composite.h                      |   3 +-
+ src/shaders/cs_composite_rcas.comp           |   1 +
+ src/shaders/cs_gaussian_blur_horizontal.comp |   1 +
+ src/shaders/cs_rgb_to_nv12.comp              |   1 +
+ src/steamcompmgr.cpp                         |  12 +-
+ tests/test_auto_hdr_color.cpp                | 206 ++++++++++++++++---
+ 12 files changed, 305 insertions(+), 54 deletions(-)
+
+diff --git a/src/AutoHDRColor.cpp b/src/AutoHDRColor.cpp
+index 6387c018..bd01d74a 100644
+--- a/src/AutoHDRColor.cpp
++++ b/src/AutoHDRColor.cpp
+@@ -13,6 +13,8 @@ namespace gamescope::autohdr
+ 		constexpr double kBT2020R = 0.262698338956556;
+ 		constexpr double kBT2020G = 0.678008765772817;
+ 		constexpr double kBT2020B = 0.0592928952706273;
++		constexpr double kDerivativeRampWidth = 0.05;
++		constexpr double kMaximumSlopeMultiplier = 10.0;
+ 		double finiteNonNegative( double value )
+ 		{
+ 			return std::isfinite( value ) ? std::max( value, 0.0 ) : 0.0;
+@@ -36,6 +38,11 @@ namespace gamescope::autohdr
+ 		{
+ 			return std::isfinite( value.r ) && std::isfinite( value.g ) && std::isfinite( value.b );
+ 		}
++
++		double effectiveContentNits( const Config &config )
++		{
++			return config.contentNits.value_or( config.targetNits );
++		}
+ 	}
+ 
+ 	bool validConfig( const Config &config )
+@@ -44,7 +51,11 @@ namespace gamescope::autohdr
+ 			std::isfinite( config.targetNits ) &&
+ 			config.sdrNits > 0.0 &&
+ 			config.targetNits >= config.sdrNits &&
+-			config.targetNits <= 10000.0;
++			config.targetNits <= 10000.0 &&
++			( !config.contentNits ||
++				( std::isfinite( *config.contentNits ) &&
++					*config.contentNits >= config.sdrNits &&
++					*config.contentNits <= config.targetNits ) );
+ 	}
+ 
+ 	double srgbDecode( double encoded )
+@@ -120,9 +131,10 @@ namespace gamescope::autohdr
+ 
+ 	std::optional<RGB> efficientInverseToneMap( const RGB &linearRec2020, const Config &config )
+ 	{
+-		// Independently derived selective-highlight proof. Preserve the SDR
+-		// display-light baseline through 85% BT.2020 luminance, then add the
+-		// available HDR headroom with a C2 quintic smoothstep.
++		// Independently derived slope-limited selective-highlight curve. A
++		// five-percent derivative ramp makes both joins C2 while bounding the
++		// output slope to ten times the SDR reference. The converted-content
++		// ceiling remains separate from the output-profile safety peak.
+ 		if ( !validConfig( config ) )
+ 			return std::nullopt;
+ 
+@@ -130,18 +142,36 @@ namespace gamescope::autohdr
+ 		if ( color.r == 0.0 && color.g == 0.0 && color.b == 0.0 )
+ 			return RGB{};
+ 
+-		constexpr double highlightKnee = 0.85;
+ 		const double luminance = kBT2020R * color.r + kBT2020G * color.g + kBT2020B * color.b;
+ 		if ( luminance <= 0.0 || !std::isfinite( luminance ) )
+ 			return RGB{};
+ 
+ 		double mappedLuminance = config.sdrNits * luminance;
+-		if ( luminance > highlightKnee )
++		const double requestedHeadroom = effectiveContentNits( config ) - config.sdrNits;
++		if ( requestedHeadroom > 0.0 )
+ 		{
+-			const double t = std::clamp(
+-				( luminance - highlightKnee ) / ( 1.0 - highlightKnee ), 0.0, 1.0 );
+-			const double highlight = t * t * t * ( t * ( t * 6.0 - 15.0 ) + 10.0 );
+-			mappedLuminance += ( config.targetNits - config.sdrNits ) * highlight;
++			const double maximumAddedSlope = ( kMaximumSlopeMultiplier - 1.0 ) * config.sdrNits;
++			const double addedSlope = std::min(
++				maximumAddedSlope, 2.0 * requestedHeadroom / kDerivativeRampWidth );
++			const double maximumHeadroom =
++				addedSlope * ( 1.0 - kDerivativeRampWidth / 2.0 );
++			const double headroom = std::min( requestedHeadroom, maximumHeadroom );
++			const double shoulderStart =
++				1.0 - headroom / addedSlope - kDerivativeRampWidth / 2.0;
++			const double u = luminance - shoulderStart;
++
++			if ( u > 0.0 && u < kDerivativeRampWidth )
++			{
++				const double z = u / kDerivativeRampWidth;
++				const double z2 = z * z;
++				const double z4 = z2 * z2;
++				const double rampIntegral = z4 * ( z2 - 3.0 * z + 2.5 );
++				mappedLuminance += addedSlope * kDerivativeRampWidth * rampIntegral;
++			}
++			else if ( u >= kDerivativeRampWidth )
++			{
++				mappedLuminance += addedSlope * ( u - kDerivativeRampWidth / 2.0 );
++			}
+ 		}
+ 
+ 		const double scale = mappedLuminance / luminance;
+diff --git a/src/AutoHDRColor.h b/src/AutoHDRColor.h
+index 9ce03ba3..556020ac 100644
+--- a/src/AutoHDRColor.h
++++ b/src/AutoHDRColor.h
+@@ -36,6 +36,9 @@ namespace gamescope::autohdr
+ 	{
+ 		double sdrNits;
+ 		double targetNits;
++		// Converted SDR content may use less than the output-profile safety peak.
++		// An unset ceiling preserves the existing target-based configuration.
++		std::optional<double> contentNits = std::nullopt;
+ 	};
+ 
+ 	bool validConfig( const Config &config );
+diff --git a/src/main.cpp b/src/main.cpp
+index 133b8768..5b2f7699 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -147,6 +147,7 @@ const struct option *gamescope_options = (struct option[]){
+ 	{ "hdr-itm-enabled", no_argument, nullptr, 0 },
+ 	{ "hdr-itm-sdr-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-target-nits", required_argument, nullptr, 0 },
++	{ "hdr-itm-content-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-debug-force-support", no_argument, nullptr, 0 },
+ 	{ "hdr-debug-force-output", no_argument, nullptr, 0 },
+ 	{ "hdr-debug-heatmap", no_argument, nullptr, 0 },
+@@ -216,6 +217,8 @@ const char usage[] =
+ 	"                                 Default: 100 nits, Max: 1000 nits\n"
+ 	"  --hdr-itm-target-nits          set the target luminace of the inverse tone mapping process.\n"
+ 	"                                 Default: 1000 nits, Max: 10000 nits\n"
++	"  --hdr-itm-content-nits         set the converted SDR content ceiling in nits.\n"
++	"                                 Default: target nits, clamped between SDR and target nits\n"
+ 	"  --framerate-limit              Set a simple framerate limit. Used as a divisor of the refresh rate, rounds down eg 60 / 59 -> 60fps, 60 / 25 -> 30fps. Default: 0, disabled.\n"
+ 	"  --mangoapp                     Launch with the mangoapp (mangohud) performance overlay enabled. You should use this instead of using mangohud on the game or gamescope.\n"
+ 	"  --adaptive-sync                Enable adaptive sync if available (variable rate refresh)\n"
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index d8b8e37a..5e332d19 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -10,6 +10,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <bitset>
++#include <cmath>
+ #include <thread>
+ #include <dlfcn.h>
+ #include "vulkan_include.h"
+@@ -3773,6 +3774,22 @@ float g_flInternalDisplayBrightnessNits = 500.0f;
+ 
+ float g_flHDRItmSdrNits = 100.f;
+ float g_flHDRItmTargetNits = 1000.f;
++float g_flHDRItmContentNits = 0.f;
++
++float get_hdr_itm_content_nits()
++{
++	const float sdrNits =
++		std::isfinite( g_flHDRItmSdrNits ) && g_flHDRItmSdrNits > 0.f
++			? g_flHDRItmSdrNits
++			: 100.f;
++	const float targetNits =
++		std::isfinite( g_flHDRItmTargetNits ) && g_flHDRItmTargetNits >= sdrNits
++			? std::min( g_flHDRItmTargetNits, 10000.f )
++			: sdrNits;
++	if ( !std::isfinite( g_flHDRItmContentNits ) || g_flHDRItmContentNits <= 0.f )
++		return targetNits;
++	return std::clamp( g_flHDRItmContentNits, sdrNits, targetNits );
++}
+ 
+ #pragma pack(push, 1)
+ struct BlitPushData_t
+@@ -3793,6 +3810,7 @@ struct BlitPushData_t
+     float u_nitsToLinear; // unset
+     float u_itmSdrNits; // unset
+     float u_itmTargetNits; // unset
++    float u_itmContentNits; // unset
+ 
+ 	explicit BlitPushData_t(const struct FrameInfo_t *frameInfo)
+ 	{
+@@ -3835,6 +3853,7 @@ struct BlitPushData_t
+ 		u_nitsToLinear = 1.0f / g_flInternalDisplayBrightnessNits;
+ 		u_itmSdrNits = g_flHDRItmSdrNits;
+ 		u_itmTargetNits = g_flHDRItmTargetNits;
++		u_itmContentNits = get_hdr_itm_content_nits();
+ 	}
+ 
+ 	explicit BlitPushData_t(float blit_scale) {
+@@ -3862,6 +3881,7 @@ struct BlitPushData_t
+ 		u_nitsToLinear = 1.0f / g_flInternalDisplayBrightnessNits;
+ 		u_itmSdrNits = g_flHDRItmSdrNits;
+ 		u_itmTargetNits = g_flHDRItmTargetNits;
++		u_itmContentNits = get_hdr_itm_content_nits();
+ 	}
+ };
+ 
+@@ -3935,6 +3955,7 @@ struct RcasPushData_t
+     float u_nitsToLinear; // unset
+     float u_itmSdrNits; // unset
+     float u_itmTargetNits; // unset
++    float u_itmContentNits; // unset
+ 
+ 	RcasPushData_t(const struct FrameInfo_t *frameInfo, float sharpness)
+ 	{
+@@ -3981,6 +4002,7 @@ struct RcasPushData_t
+ 		u_nitsToLinear = 1.0f / g_flInternalDisplayBrightnessNits;
+ 		u_itmSdrNits = g_flHDRItmSdrNits;
+ 		u_itmTargetNits = g_flHDRItmTargetNits;
++		u_itmContentNits = get_hdr_itm_content_nits();
+ 
+ 		for (uint32_t i = 1; i < k_nMaxLayers; i++)
+ 		{
+@@ -3995,10 +4017,18 @@ static_assert( offsetof( BlitPushData_t, autoHDRSourceTo2020 ) ==
+ 	offsetof( BlitPushData_t, ctm ) + sizeof( BlitPushData_t::ctm ) );
+ static_assert( offsetof( BlitPushData_t, borderMask ) ==
+ 	offsetof( BlitPushData_t, autoHDRSourceTo2020 ) + sizeof( glm::mat3x4 ) );
++static_assert( offsetof( BlitPushData_t, u_itmContentNits ) ==
++	offsetof( BlitPushData_t, u_itmTargetNits ) + sizeof( float ) );
++static_assert( sizeof( BlitPushData_t ) ==
++	offsetof( BlitPushData_t, u_itmContentNits ) + sizeof( float ) );
+ static_assert( offsetof( RcasPushData_t, autoHDRSourceTo2020 ) ==
+ 	offsetof( RcasPushData_t, ctm ) + sizeof( RcasPushData_t::ctm ) );
+ static_assert( offsetof( RcasPushData_t, u_borderMask ) ==
+ 	offsetof( RcasPushData_t, autoHDRSourceTo2020 ) + sizeof( glm::mat3x4 ) );
++static_assert( offsetof( RcasPushData_t, u_itmContentNits ) ==
++	offsetof( RcasPushData_t, u_itmTargetNits ) + sizeof( float ) );
++static_assert( sizeof( RcasPushData_t ) ==
++	offsetof( RcasPushData_t, u_itmContentNits ) + sizeof( float ) );
+ 
+ struct NisPushData_t
+ {
+diff --git a/src/shaders/blit_push_data.h b/src/shaders/blit_push_data.h
+index 7504d71c..165a957f 100644
+--- a/src/shaders/blit_push_data.h
++++ b/src/shaders/blit_push_data.h
+@@ -17,5 +17,6 @@ uniform layers_t {
+     float u_nitsToLinear; // hdr -> sdr
+     float u_itmSdrNits;
+     float u_itmTargetNits;
++    float u_itmContentNits;
+ };
+ 
+diff --git a/src/shaders/colorimetry.h b/src/shaders/colorimetry.h
+index a57e64a8..7fd59b79 100644
+--- a/src/shaders/colorimetry.h
++++ b/src/shaders/colorimetry.h
+@@ -186,37 +186,63 @@ bool finite_color(vec3 color)
+     return !any(isnan(color)) && !any(isinf(color));
+ }
+ 
+-// Independently derived selective-highlight proof. Preserve the SDR
+-// display-light baseline through 85% BT.2020 luminance, then add the available
+-// HDR headroom with a C2 quintic smoothstep.
++// Independently derived slope-limited selective-highlight curve. A
++// five-percent derivative ramp makes both joins C2 while bounding the output
++// slope to ten times the SDR reference. The converted-content ceiling remains
++// separate from the output-profile safety peak.
+ vec3 efficient_inverse_tonemapping(
+     vec3  color,
+     float sdr_nits,
+-    float target_nits)
++    float target_nits,
++    float content_nits)
+ {
+     const vec3 k_bt2020 = vec3(0.262698338956556, 0.678008765772817, 0.0592928952706273);
++    const float derivative_ramp_width = 0.05f;
++    const float maximum_slope_multiplier = 10.0f;
+ 
+     if (isnan(sdr_nits) || isinf(sdr_nits) ||
+         isnan(target_nits) || isinf(target_nits) ||
+-        sdr_nits <= 0.0f || target_nits < sdr_nits || target_nits > 10000.0f)
++        isnan(content_nits) || isinf(content_nits) ||
++        sdr_nits <= 0.0f || target_nits < sdr_nits || target_nits > 10000.0f ||
++        content_nits < sdr_nits || content_nits > target_nits)
+         return vec3(0.0f);
+ 
+     color = bounded_color(color, 1.0f);
+     if (all(equal(color, vec3(0.0f))))
+         return vec3(0.0f);
+ 
+-    const float highlight_knee = 0.85f;
+     const float luminance = dot(color, k_bt2020);
+     if (luminance <= 0.0f || isnan(luminance) || isinf(luminance))
+         return vec3(0.0f);
+ 
+     float mapped_luminance = sdr_nits * luminance;
+-    if (luminance > highlight_knee)
++    const float requested_headroom = content_nits - sdr_nits;
++    if (requested_headroom > 0.0f)
+     {
+-        const float t = clamp(
+-            (luminance - highlight_knee) / (1.0f - highlight_knee), 0.0f, 1.0f);
+-        const float highlight = t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f);
+-        mapped_luminance += (target_nits - sdr_nits) * highlight;
++        const float maximum_added_slope =
++            (maximum_slope_multiplier - 1.0f) * sdr_nits;
++        const float added_slope = min(
++            maximum_added_slope, 2.0f * requested_headroom / derivative_ramp_width);
++        const float maximum_headroom =
++            added_slope * (1.0f - derivative_ramp_width / 2.0f);
++        const float headroom = min(requested_headroom, maximum_headroom);
++        const float shoulder_start =
++            1.0f - headroom / added_slope - derivative_ramp_width / 2.0f;
++        const float u = luminance - shoulder_start;
++
++        if (u > 0.0f && u < derivative_ramp_width)
++        {
++            const float z = u / derivative_ramp_width;
++            const float z2 = z * z;
++            const float z4 = z2 * z2;
++            const float ramp_integral = z4 * (z2 - 3.0f * z + 2.5f);
++            mapped_luminance += added_slope * derivative_ramp_width * ramp_integral;
++        }
++        else if (u >= derivative_ramp_width)
++        {
++            mapped_luminance +=
++                added_slope * (u - derivative_ramp_width / 2.0f);
++        }
+     }
+ 
+     vec3 mapped = color * (mapped_luminance / luminance);
+diff --git a/src/shaders/composite.h b/src/shaders/composite.h
+index 3aba0328..afbaf8fc 100644
+--- a/src/shaders/composite.h
++++ b/src/shaders/composite.h
+@@ -84,7 +84,8 @@ vec3 apply_layer_color_mgmt(vec3 color, uint layer, uint colorspace) {
+     if (auto_hdr_enabled && auto_hdr_eligible)
+     {
+         color = (vec4(bounded_color(color, 1.0f), 1.0f) * u_autoHDRSourceTo2020).rgb;
+-        color = nitsToScRGB(efficient_inverse_tonemapping(color, u_itmSdrNits, u_itmTargetNits));
++        color = nitsToScRGB(efficient_inverse_tonemapping(
++            color, u_itmSdrNits, u_itmTargetNits, u_itmContentNits));
+         // Values use scRGB luminance units, but the mapped primaries are BT.2020.
+         colorspace = colorspace_pq;
+     }
+diff --git a/src/shaders/cs_composite_rcas.comp b/src/shaders/cs_composite_rcas.comp
+index 9c08e7c2..c51a2e49 100644
+--- a/src/shaders/cs_composite_rcas.comp
++++ b/src/shaders/cs_composite_rcas.comp
+@@ -30,6 +30,7 @@ uniform layers_t {
+     float u_nitsToLinear;
+     float u_itmSdrNits;
+     float u_itmTargetNits;
++    float u_itmContentNits;
+ };
+ 
+ #include "composite.h"
+diff --git a/src/shaders/cs_gaussian_blur_horizontal.comp b/src/shaders/cs_gaussian_blur_horizontal.comp
+index cccb14b8..79a750ce 100644
+--- a/src/shaders/cs_gaussian_blur_horizontal.comp
++++ b/src/shaders/cs_gaussian_blur_horizontal.comp
+@@ -29,6 +29,7 @@ uniform layers_t {
+     float u_nitsToLinear;
+     float u_itmSdrNits;
+     float u_itmTargetNits;
++    float u_itmContentNits;
+ };
+ 
+ #include "composite.h"
+diff --git a/src/shaders/cs_rgb_to_nv12.comp b/src/shaders/cs_rgb_to_nv12.comp
+index f5c6fb9c..440d48c4 100644
+--- a/src/shaders/cs_rgb_to_nv12.comp
++++ b/src/shaders/cs_rgb_to_nv12.comp
+@@ -22,6 +22,7 @@ const float u_linearToNits = 400.0f;
+ const float u_nitsToLinear = 1.0f / 100.0f;
+ const float u_itmSdrNits = 100.f;
+ const float u_itmTargetNits = 1000.f;
++const float u_itmContentNits = u_itmTargetNits;
+ const mat3x4 u_autoHDRSourceTo2020 = mat3x4(1.0f);
+ 
+ layout(binding = 0, scalar)
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index ac2c0712..f143adf7 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -168,6 +168,8 @@ bool g_bForceHDRSupportDebug = false;
+ extern float g_flInternalDisplayBrightnessNits;
+ extern float g_flHDRItmSdrNits;
+ extern float g_flHDRItmTargetNits;
++extern float g_flHDRItmContentNits;
++extern float get_hdr_itm_content_nits();
+ 
+ uint64_t g_lastWinSeq = 0;
+ 
+@@ -2617,10 +2619,13 @@ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendC
+ 	static uint64_t previousConnectorID = 0;
+ 	static uint64_t previousSdrBits = 0;
+ 	static uint64_t previousTargetBits = 0;
++	static uint64_t previousContentBits = 0;
+ 	static uint64_t previousPeakBits = 0;
+ 	const uint64_t connectorID = connector ? connector->GetConnectorID() : 0;
+ 	const uint64_t sdrBits = std::bit_cast<uint64_t>( input.sdrReferenceNits );
+ 	const uint64_t targetBits = std::bit_cast<uint64_t>( input.targetNits );
++	const float contentNits = get_hdr_itm_content_nits();
++	const uint64_t contentBits = std::bit_cast<uint64_t>( double( contentNits ) );
+ 	const uint64_t peakBits = std::bit_cast<uint64_t>( input.calibratedOutputPeakNits );
+ 	if ( !logged ||
+ 		 previous.layerMask != result.layerMask ||
+@@ -2628,21 +2633,24 @@ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendC
+ 		 previousConnectorID != connectorID ||
+ 		 previousSdrBits != sdrBits ||
+ 		 previousTargetBits != targetBits ||
++		 previousContentBits != contentBits ||
+ 		 previousPeakBits != peakBits )
+ 	{
+-		auto_hdr_log.infof( "connector=%s id=%" PRIu64 " policy=%.*s layer-mask=0x%08x sdr=%.1f target=%.1f peak=%.1f nits",
++		auto_hdr_log.infof( "connector=%s id=%" PRIu64 " policy=%.*s layer-mask=0x%08x sdr=%.1f content=%.1f target=%.1f peak=%.1f nits",
+ 			connector ? connector->GetName() : "none",
+ 			connectorID,
+ 			int( gamescope::autohdr::policyReasonName( result.reason ).size() ),
+ 			gamescope::autohdr::policyReasonName( result.reason ).data(),
+ 			result.layerMask,
+ 			input.sdrReferenceNits,
++			contentNits,
+ 			input.targetNits,
+ 			input.calibratedOutputPeakNits );
+ 		previous = result;
+ 		previousConnectorID = connectorID;
+ 		previousSdrBits = sdrBits;
+ 		previousTargetBits = targetBits;
++		previousContentBits = contentBits;
+ 		previousPeakBits = peakBits;
+ 		logged = true;
+ 	}
+@@ -8552,6 +8560,8 @@ steamcompmgr_main(int argc, char **argv)
+ 					g_flHDRItmSdrNits = atof(optarg);
+ 				} else if (strcmp(opt_name, "hdr-itm-target-nits") == 0) {
+ 					g_flHDRItmTargetNits = atof(optarg);
++				} else if (strcmp(opt_name, "hdr-itm-content-nits") == 0) {
++					g_flHDRItmContentNits = atof(optarg);
+ 				} else if (strcmp(opt_name, "framerate-limit") == 0) {
+ 					g_nSteamCompMgrTargetFPS = atoi(optarg);
+ 				} else if (strcmp(opt_name, "reshade-effect") == 0) {
+diff --git a/tests/test_auto_hdr_color.cpp b/tests/test_auto_hdr_color.cpp
+index e7e9d9cf..e4693597 100644
+--- a/tests/test_auto_hdr_color.cpp
++++ b/tests/test_auto_hdr_color.cpp
+@@ -46,6 +46,66 @@ namespace
+ 		const auto mapped = gamescope::autohdr::efficientInverseToneMap( { level, level, level }, config );
+ 		return mapped ? mapped->r : std::numeric_limits<double>::quiet_NaN();
+ 	}
++
++	double bt2020Luminance( const RGB &value )
++	{
++		return 0.262698338956556 * value.r +
++			0.678008765772817 * value.g +
++			0.0592928952706273 * value.b;
++	}
++
++	struct CurveParameters
++	{
++		double contentNits;
++		double addedSlope;
++		double headroom;
++		double shoulderStart;
++	};
++
++	CurveParameters curveParameters( const Config &config )
++	{
++		constexpr double rampWidth = 0.05;
++		const double contentNits = config.contentNits.value_or( config.targetNits );
++		const double requestedHeadroom = contentNits - config.sdrNits;
++		if ( requestedHeadroom <= 0.0 )
++			return { contentNits, 0.0, 0.0, 1.0 };
++		const double addedSlope = std::min( 9.0 * config.sdrNits, 2.0 * requestedHeadroom / rampWidth );
++		const double headroom = std::min(
++			requestedHeadroom, addedSlope * ( 1.0 - rampWidth / 2.0 ) );
++		return {
++			contentNits,
++			addedSlope,
++			headroom,
++			1.0 - headroom / addedSlope - rampWidth / 2.0,
++		};
++	}
++
++	double analyticSlope( double level, const Config &config )
++	{
++		constexpr double rampWidth = 0.05;
++		const CurveParameters parameters = curveParameters( config );
++		const double z = ( level - parameters.shoulderStart ) / rampWidth;
++		if ( z <= 0.0 || parameters.addedSlope == 0.0 )
++			return config.sdrNits;
++		if ( z >= 1.0 )
++			return config.sdrNits + parameters.addedSlope;
++		const double z2 = z * z;
++		const double z3 = z2 * z;
++		return config.sdrNits + parameters.addedSlope *
++			( 6.0 * z2 * z3 - 15.0 * z2 * z2 + 10.0 * z3 );
++	}
++
++	double analyticSecondDerivative( double level, const Config &config )
++	{
++		constexpr double rampWidth = 0.05;
++		const CurveParameters parameters = curveParameters( config );
++		const double z = ( level - parameters.shoulderStart ) / rampWidth;
++		if ( z <= 0.0 || z >= 1.0 || parameters.addedSlope == 0.0 )
++			return 0.0;
++		const double z2 = z * z;
++		const double oneMinusZ = 1.0 - z;
++		return parameters.addedSlope / rampWidth * 30.0 * z2 * oneMinusZ * oneMinusZ;
++	}
+ }
+ 
+ int main()
+@@ -86,46 +146,81 @@ int main()
+ 	check( validConfig( { 100.0, 650.0 } ), "100/650 config valid" );
+ 	check( validConfig( { 100.0, 1000.0 } ), "100/1000 config valid" );
+ 	check( validConfig( { 203.0, 650.0 } ), "203/650 config valid" );
++	check( validConfig( { 203.0, 650.0, 550.0 } ), "203/650/550 split ceiling config valid" );
+ 	check( validConfig( { 203.0, 203.0 } ), "equal reference and target valid" );
+ 	check( !validConfig( { 0.0, 650.0 } ), "zero SDR reference rejected" );
+ 	check( !validConfig( { 650.0, 203.0 } ), "peak below SDR reference rejected" );
+ 	check( !validConfig( { 100.0, 10001.0 } ), "peak above PQ range rejected" );
+ 	check( !validConfig( { std::numeric_limits<double>::quiet_NaN(), 650.0 } ), "nonfinite config rejected" );
++	check( !validConfig( { 203.0, 650.0, 202.0 } ), "content ceiling below SDR reference rejected" );
++	check( !validConfig( { 203.0, 650.0, 651.0 } ), "content ceiling above output peak rejected" );
++	check( !validConfig( { 203.0, 650.0, std::numeric_limits<double>::quiet_NaN() } ),
++		"nonfinite content ceiling rejected" );
++	check( !validConfig( { 203.0, 650.0, std::numeric_limits<double>::infinity() } ),
++		"infinite content ceiling rejected" );
+ 	check( !efficientInverseToneMap( { 1.0, 1.0, 1.0 }, { 0.0, 650.0 } ), "invalid config fails closed" );
+ 
+-	constexpr Config odinConfig{ 203.0, 650.0 };
+-	const std::array<std::pair<double, double>, 12> neutralGolden = {{
++	const Config odinConfig{ 203.0, 650.0, 550.0 };
++	const CurveParameters odinCurve = curveParameters( odinConfig );
++	near( odinCurve.contentNits, 550.0, 0.0, "Odin converted-content ceiling" );
++	near( odinCurve.addedSlope + odinConfig.sdrNits, 2030.0, 1e-12, "Odin maximum output slope" );
++	near( odinCurve.shoulderStart, 0.7850711548987411, 1e-15, "Odin derived shoulder start" );
++
++	const std::array<std::pair<double, double>, 10> neutralGolden = {{
+ 		{ 0.00, 0.0000 },
+ 		{ 0.01, 2.0300 },
+ 		{ 0.18, 36.5400 },
+ 		{ 0.50, 101.5000 },
+-		{ 0.80, 162.4000 },
+-		{ 0.83, 168.4900 },
+-		{ 0.837, 169.9110 },
+-		{ 0.85, 172.5500 },
+-		{ 0.90, 276.5148 },
+-		{ 0.95, 546.0352 },
+-		{ 0.98, 637.3505 },
+-		{ 1.00, 650.00 },
++		{ 0.80, 163.6 },
++		{ 0.85, 245.5 },
++		{ 0.90, 347.0 },
++		{ 0.95, 448.5 },
++		{ 1.00, 550.0 },
++		{ odinCurve.shoulderStart, odinConfig.sdrNits * odinCurve.shoulderStart },
+ 	}};
+ 	for ( const auto &[input, expected] : neutralGolden )
+-		near( neutralNits( input, odinConfig ), expected, 0.005, "Odin selective-highlight neutral golden" );
++		near( neutralNits( input, odinConfig ), expected, 0.06, "Odin slope-limited neutral golden" );
+ 
+-	// The low and middle range, including the knee, is exactly the SDR baseline.
+-	for ( int step = 0; step <= 850; step++ )
++	// The low and middle range through the derived shoulder start is exactly
++	// the SDR baseline.
++	for ( int step = 0; step <= 4096; step++ )
+ 	{
+-		const double level = step / 1000.0;
++		const double level = step / 4096.0;
++		if ( level > odinCurve.shoulderStart )
++			break;
+ 		near( neutralNits( level, odinConfig ), odinConfig.sdrNits * level, 1e-12,
+-			"Odin selective-highlight baseline unchanged through knee" );
++			"Odin slope-limited baseline unchanged through shoulder start" );
+ 	}
+ 
+-	// The quintic highlight contribution is C2 at the 0.85 knee.
+-	constexpr double knee = 0.85;
++	// The integrated derivative ramp is C2 at both joins.
+ 	constexpr double epsilon = 1e-6;
+-	const double leftSlope = ( neutralNits( knee, odinConfig ) - neutralNits( knee - epsilon, odinConfig ) ) / epsilon;
+-	const double rightSlope = ( neutralNits( knee + epsilon, odinConfig ) - neutralNits( knee, odinConfig ) ) / epsilon;
+-	near( leftSlope, odinConfig.sdrNits, 1e-7, "Odin selective-highlight left knee slope" );
+-	near( rightSlope, odinConfig.sdrNits, 2e-6, "Odin selective-highlight right knee slope" );
++	near( neutralNits( odinCurve.shoulderStart, odinConfig ),
++		odinConfig.sdrNits * odinCurve.shoulderStart, 1e-12,
++		"Odin first join value" );
++	near( neutralNits( odinCurve.shoulderStart + 0.05, odinConfig ),
++		odinConfig.sdrNits * ( odinCurve.shoulderStart + 0.05 ) +
++			odinCurve.addedSlope * 0.025,
++		1e-10, "Odin second join value" );
++	near( analyticSlope( odinCurve.shoulderStart, odinConfig ),
++		odinConfig.sdrNits, 0.0, "Odin first join analytic slope" );
++	near( analyticSlope( odinCurve.shoulderStart + 0.05, odinConfig ),
++		odinConfig.sdrNits + odinCurve.addedSlope, 1e-12,
++		"Odin second join analytic slope" );
++	near( analyticSecondDerivative( odinCurve.shoulderStart, odinConfig ),
++		0.0, 0.0, "Odin first join analytic second derivative" );
++	near( analyticSecondDerivative( odinCurve.shoulderStart + 0.05, odinConfig ),
++		0.0, 0.0, "Odin second join analytic second derivative" );
++	for ( const double join : { odinCurve.shoulderStart, odinCurve.shoulderStart + 0.05 } )
++	{
++		const double leftSlope =
++			( neutralNits( join, odinConfig ) - neutralNits( join - epsilon, odinConfig ) ) / epsilon;
++		const double rightSlope =
++			( neutralNits( join + epsilon, odinConfig ) - neutralNits( join, odinConfig ) ) / epsilon;
++		near( leftSlope, rightSlope, 0.002, "Odin finite first derivative continuous at join" );
++		near( analyticSecondDerivative( join - epsilon, odinConfig ),
++			analyticSecondDerivative( join + epsilon, odinConfig ), 0.03,
++			"Odin analytic second derivative continuous at join" );
++	}
+ 
+ 	for ( const Config config : { Config{ 100.0, 650.0 }, Config{ 100.0, 1000.0 }, odinConfig } )
+ 	{
+@@ -153,6 +248,45 @@ int main()
+ 			previous = output->r;
+ 		}
+ 
++		const CurveParameters parameters = curveParameters( config );
++		const double maximumSlope = 10.0 * config.sdrNits;
++		for ( int step = 0; step <= 4096; step++ )
++		{
++			const double level = step / 4096.0;
++			check( analyticSlope( level, config ) <= maximumSlope + 1e-9,
++				"analytic slope remains within configured bound" );
++			if ( step > 0 && step < 4096 )
++			{
++				constexpr double derivativeStep = 1e-7;
++				const double finiteSlope =
++					( neutralNits( level + derivativeStep, config ) -
++						neutralNits( level - derivativeStep, config ) ) /
++					( 2.0 * derivativeStep );
++				check( finiteSlope <= maximumSlope + 0.02,
++					"finite-difference slope remains within configured bound" );
++				near( finiteSlope, analyticSlope( level, config ), 0.02,
++					"finite-difference and analytic slopes agree" );
++			}
++
++			for ( const double delta : { 1.0 / 1023.0, 2.0 / 1023.0, 1.0 / 255.0 } )
++			{
++				const double low = std::max( 0.0, level - delta );
++				const double high = std::min( 1.0, level + delta );
++				const double response = std::abs(
++					neutralNits( high, config ) - neutralNits( low, config ) );
++				check( response <= maximumSlope * ( high - low ) + 1e-8,
++					"oscillation response obeys maximum-slope Lipschitz bound" );
++			}
++		}
++
++		const double expectedWhite = config.sdrNits + parameters.headroom;
++		near( neutralNits( 1.0, config ), expectedWhite, 1e-9,
++			"white reaches feasible converted-content ceiling" );
++		check( expectedWhite <= parameters.contentNits + 1e-12,
++			"feasible content ceiling never exceeds requested ceiling" );
++		check( expectedWhite <= config.targetNits + 1e-12,
++			"converted content remains below output safety peak" );
++
+ 		for ( int r = 0; r <= 16; r++ )
+ 			for ( int g = 0; g <= 16; g++ )
+ 				for ( int b = 0; b <= 16; b++ )
+@@ -161,7 +295,11 @@ int main()
+ 						{ r / 16.0, g / 16.0, b / 16.0 }, config );
+ 					check( output.has_value(), "dense RGB conversion accepted" );
+ 					if ( output )
++					{
+ 						check( finiteAndBounded( *output, config.targetNits ), "dense RGB finite and bounded" );
++						check( bt2020Luminance( *output ) <= parameters.contentNits + 1e-9,
++							"dense RGB luminance respects converted-content ceiling" );
++					}
+ 				}
+ 	}
+ 
+@@ -177,17 +315,23 @@ int main()
+ 	check( saturated.has_value() && finiteAndBounded( *saturated, odinConfig.targetNits ),
+ 		"Odin saturated input finite and bounded" );
+ 
+-	const RGB peakCappedInput{ 1.0, 0.99, 0.81 };
+-	const auto peakCapped = efficientInverseToneMap( peakCappedInput, odinConfig );
+-	check( peakCapped.has_value(), "peak-capped chromatic conversion accepted" );
+-	if ( peakCapped )
++	const RGB brightChromaticInput{ 1.0, 0.99, 0.81 };
++	const auto brightChromatic = efficientInverseToneMap( brightChromaticInput, odinConfig );
++	check( brightChromatic.has_value(), "bright chromatic conversion accepted" );
++	if ( brightChromatic )
+ 	{
+-		near( peakCapped->r / peakCapped->g, peakCappedInput.r / peakCappedInput.g, 1e-12,
+-			"peak cap preserves R/G ratio" );
+-		near( peakCapped->g / peakCapped->b, peakCappedInput.g / peakCappedInput.b, 1e-12,
+-			"peak cap preserves G/B ratio" );
+-		near( std::max( { peakCapped->r, peakCapped->g, peakCapped->b } ), odinConfig.targetNits, 1e-10,
+-			"peak cap reaches target without exceeding it" );
++		near( brightChromatic->r / brightChromatic->g,
++			brightChromaticInput.r / brightChromaticInput.g, 1e-12,
++			"bright chromatic mapping preserves R/G ratio" );
++		near( brightChromatic->g / brightChromatic->b,
++			brightChromaticInput.g / brightChromaticInput.b, 1e-12,
++			"bright chromatic mapping preserves G/B ratio" );
++		check( bt2020Luminance( *brightChromatic ) <=
++				odinConfig.contentNits.value_or( odinConfig.targetNits ) + 1e-9,
++			"bright chromatic luminance respects converted-content ceiling" );
++		check( std::max( { brightChromatic->r, brightChromatic->g, brightChromatic->b } ) <=
++				odinConfig.targetNits,
++			"bright chromatic output respects target safety cap" );
+ 	}
+ 
+ 	const RGB chromaticInput{ 0.8, 0.6, 0.2 };
+-- 
+2.51.0.windows.2
+
