@@ -1,0 +1,24 @@
+From 9bcedecacf96375af6b010bd28494ec94c9ac846 Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Sun, 26 Jul 2026 10:47:49 -0400
+Subject: [PATCH] fix(autohdr): include rendered feedback helper
+
+---
+ src/rendervulkan.cpp | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 2b2d954c..2f85b460 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -36,6 +36,7 @@
+ 
+ #include "rendervulkan.hpp"
+ #include "AutoHDRAdaptive.h"
++#include "AutoHDRRootProperties.h"
+ #include "ClientFormatPolicy.h"
+ #include "main.hpp"
+ #include "steamcompmgr.hpp"
+-- 
+2.51.0.windows.2
+

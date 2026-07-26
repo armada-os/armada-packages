@@ -66,3 +66,6 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
 - `patches/0024-autohdr-report-only-rendered-conversion-as-active.patch`
   source: armada
   notes: Exact format-patch of local Gamescope commit `a1106e8eed7d57fe33f2e69eeebeb6de8a29b44b` relative to `212ffb91e06d39be6e0e04d34de98327ece12132`. Separates policy eligibility from actual render feedback so a successful Quality or Efficient pipeline reports active conversion while a zero-mask safety fallback reports inactive, Effective Off, and no compositor-generated HDR badge. The change follows the existing Gamescope BSD-2-Clause lineage; all new code and tests are BSD-2-Clause. It was independently implemented without Special K source, shaders, constants, tables, identifiers, or control flow.
+- `patches/0025-autohdr-include-rendered-feedback-helper.patch`
+  source: armada
+  notes: Exact format-patch of local Gamescope commit `9bcedecacf96375af6b010bd28494ec94c9ac846` relative to `a1106e8eed7d57fe33f2e69eeebeb6de8a29b44b`. Includes the existing Auto HDR root-property helper declaration at the Vulkan compositor call site so rendered-activation feedback builds cleanly. The change follows the existing Gamescope BSD-2-Clause lineage and adds no new algorithm, constant, or external implementation input.

@@ -66,6 +66,8 @@ Patch:          0022-auto-hdr-input-output-contract.patch
 # Expose Quality as the sole selectable engine while retaining Efficient fallback.
 Patch:          0023-autohdr-use-quality-mode-when-available.patch
 Patch:          0024-autohdr-report-only-rendered-conversion-as-active.patch
+# Include the rendered-feedback helper declaration at its compositor call site.
+Patch:          0025-autohdr-include-rendered-feedback-helper.patch
 
 BuildRequires:  cmake
 BuildRequires:  catch-devel
