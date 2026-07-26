@@ -1,0 +1,3332 @@
+From d9d3ff0e3036926f463fdcadb417cbad66704496 Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Thu, 23 Jul 2026 10:35:58 -0400
+Subject: [PATCH] autohdr: add experimental adaptive quality mode
+
+---
+ src/AutoHDRAdaptive.cpp                   | 507 ++++++++++++++++
+ src/AutoHDRAdaptive.h                     | 159 +++++
+ src/AutoHDRRootProperties.h               |  42 +-
+ src/Backends/DRMBackend.cpp               |   2 +-
+ src/Backends/OpenVRBackend.cpp            |   2 +-
+ src/Backends/SDLBackend.cpp               |   2 +-
+ src/Backends/WaylandBackend.cpp           |   2 +-
+ src/main.cpp                              |   2 +
+ src/meson.build                           |   2 +
+ src/rendervulkan.cpp                      | 688 +++++++++++++++++++++-
+ src/rendervulkan.hpp                      |  47 +-
+ src/shaders/auto_hdr_adaptive_constants.h |  47 ++
+ src/shaders/composite.h                   |  25 +-
+ src/shaders/cs_auto_hdr_analyze.comp      | 366 ++++++++++++
+ src/shaders/descriptor_set.h              |   3 +
+ src/shaders/descriptor_set_constants.h    |   1 +
+ src/steamcompmgr.cpp                      | 102 +++-
+ src/xwayland_ctx.hpp                      |   3 +
+ tests/meson.build                         |   8 +
+ tests/test_auto_hdr_adaptive.cpp          | 598 +++++++++++++++++++
+ tests/test_auto_hdr_root_properties.cpp   |  24 +-
+ 21 files changed, 2601 insertions(+), 31 deletions(-)
+ create mode 100644 src/AutoHDRAdaptive.cpp
+ create mode 100644 src/AutoHDRAdaptive.h
+ create mode 100644 src/shaders/auto_hdr_adaptive_constants.h
+ create mode 100644 src/shaders/cs_auto_hdr_analyze.comp
+ create mode 100644 tests/test_auto_hdr_adaptive.cpp
+
+diff --git a/src/AutoHDRAdaptive.cpp b/src/AutoHDRAdaptive.cpp
+new file mode 100644
+index 00000000..7d69f71e
+--- /dev/null
++++ b/src/AutoHDRAdaptive.cpp
+@@ -0,0 +1,507 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRAdaptive.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace gamescope::autohdr
++{
++	namespace
++	{
++		double finiteClamped( double value, double lower, double upper )
++		{
++			return std::isfinite( value ) ? std::clamp( value, lower, upper ) : lower;
++		}
++
++		double smoothstep( double lower, double upper, double value )
++		{
++			if ( !std::isfinite( value ) || !( upper > lower ) )
++				return 0.0;
++
++			const double t = std::clamp( ( value - lower ) / ( upper - lower ), 0.0, 1.0 );
++			return t * t * ( 3.0 - 2.0 * t );
++		}
++
++		double safeEfficientCeiling( const AdaptiveConfig &config )
++		{
++			if ( std::isfinite( config.efficientCeilingNits ) &&
++				config.efficientCeilingNits > 0.0 &&
++				config.efficientCeilingNits <= GAMESCOPE_AUTO_HDR_MAXIMUM_OUTPUT_NITS )
++				return config.efficientCeilingNits;
++			return GAMESCOPE_AUTO_HDR_DEFAULT_EFFICIENT_NITS;
++		}
++
++		bool finitePositive( double value )
++		{
++			return std::isfinite( value ) && value > 0.0;
++		}
++	}
++
++	AnalysisGrid sceneAnalysisGrid( uint32_t outputWidth, uint32_t outputHeight )
++	{
++		if ( outputWidth == 0 || outputHeight == 0 )
++			return {};
++
++		const bool landscape = outputWidth >= outputHeight;
++		const uint32_t longOutput = landscape ? outputWidth : outputHeight;
++		const uint32_t shortOutput = landscape ? outputHeight : outputWidth;
++		const uint64_t scaled =
++			uint64_t( GAMESCOPE_AUTO_HDR_ANALYSIS_LONG_AXIS ) * shortOutput +
++			longOutput / 2u;
++		const uint32_t shortAxis = std::clamp(
++			uint32_t( scaled / longOutput ),
++			uint32_t( GAMESCOPE_AUTO_HDR_ANALYSIS_MINIMUM_SHORT_AXIS ),
++			uint32_t( GAMESCOPE_AUTO_HDR_ANALYSIS_LONG_AXIS ) );
++
++		return landscape
++			? AnalysisGrid{ GAMESCOPE_AUTO_HDR_ANALYSIS_LONG_AXIS, shortAxis }
++			: AnalysisGrid{ shortAxis, GAMESCOPE_AUTO_HDR_ANALYSIS_LONG_AXIS };
++	}
++
++	SceneSample sanitizeSceneSample( const SceneSample &sample )
++	{
++		return {
++			finiteClamped( sample.luminance, 0.0, 1.0 ),
++			finiteClamped( sample.coverage, 0.0, 1.0 ),
++		};
++	}
++
++	SceneStats analyzeSceneSamples( const SceneSample *samples, std::size_t sampleCount )
++	{
++		if ( samples == nullptr || sampleCount == 0 )
++			return {};
++
++		double validWeight = 0.0;
++		double luminanceSum = 0.0;
++		double upperWeightSum = 0.0;
++		double broadWeightSum = 0.0;
++		double eighthMomentSum = 0.0;
++		double maximumLuminance = 0.0;
++
++		for ( std::size_t i = 0; i < sampleCount; i++ )
++		{
++			const SceneSample sample = sanitizeSceneSample( samples[i] );
++			if ( sample.coverage <= 0.0 )
++				continue;
++
++			const double luminance2 = sample.luminance * sample.luminance;
++			const double luminance4 = luminance2 * luminance2;
++			const double luminance8 = luminance4 * luminance4;
++			validWeight += sample.coverage;
++			luminanceSum += sample.coverage * sample.luminance;
++			upperWeightSum += sample.coverage *
++				smoothstep( GAMESCOPE_AUTO_HDR_UPPER_BAND_START,
++					GAMESCOPE_AUTO_HDR_UPPER_BAND_FULL, sample.luminance );
++			broadWeightSum += sample.coverage *
++				smoothstep( GAMESCOPE_AUTO_HDR_BROAD_SAMPLE_START,
++					GAMESCOPE_AUTO_HDR_BROAD_SAMPLE_FULL, sample.luminance );
++			eighthMomentSum += sample.coverage * luminance8;
++			maximumLuminance = std::max( maximumLuminance, sample.luminance );
++		}
++
++		const double validCoverage = std::clamp(
++			validWeight / double( sampleCount ), 0.0, 1.0 );
++		if ( validWeight <= 0.0 || !std::isfinite( validWeight ) )
++			return { 0.0, 0.0, 0.0, 0.0, validCoverage };
++
++		const double inverseWeight = 1.0 / validWeight;
++		const double mean = finiteClamped(
++			luminanceSum * inverseWeight, 0.0, 1.0 );
++		const double upperOccupancy = finiteClamped(
++			upperWeightSum * inverseWeight, 0.0, 1.0 );
++		const double broadFieldLoad = finiteClamped(
++			broadWeightSum * inverseWeight, 0.0, 1.0 );
++
++		// The eighth-power mean is insensitive to one unstable maximum but
++		// remains responsive to a compact highlight cluster. As soft upper-band
++		// occupancy becomes credible, blend toward the actual reduced maximum.
++		// Every term is a sum, maximum, or scalar operation suitable for a
++		// single-workgroup GPU reduction.
++		const double powerMean = std::pow(
++			std::max( eighthMomentSum * inverseWeight, 0.0 ),
++			GAMESCOPE_AUTO_HDR_POWER_MEAN_EXPONENT );
++		const double peakConfidence = smoothstep(
++			GAMESCOPE_AUTO_HDR_PEAK_CONFIDENCE_START,
++			GAMESCOPE_AUTO_HDR_PEAK_CONFIDENCE_FULL, upperOccupancy );
++		const double approximatePeak = finiteClamped(
++			powerMean + peakConfidence * ( maximumLuminance - powerMean ),
++			0.0,
++			1.0 );
++
++		return {
++			mean,
++			upperOccupancy,
++			approximatePeak,
++			broadFieldLoad,
++			validCoverage,
++		};
++	}
++
++	bool validAdaptiveConfig( const AdaptiveConfig &config )
++	{
++		return finitePositive( config.efficientCeilingNits ) &&
++			std::isfinite( config.outputPeakNits ) &&
++			config.outputPeakNits >= config.efficientCeilingNits &&
++			config.outputPeakNits <= GAMESCOPE_AUTO_HDR_MAXIMUM_OUTPUT_NITS &&
++			std::isfinite( config.minimumValidCoverage ) &&
++			config.minimumValidCoverage >= 0.0 &&
++			config.minimumValidCoverage <= 1.0 &&
++			std::isfinite( config.peakStart ) &&
++			std::isfinite( config.peakFull ) &&
++			config.peakStart >= 0.0 &&
++			config.peakFull > config.peakStart &&
++			config.peakFull <= 1.0 &&
++			std::isfinite( config.occupancyStart ) &&
++			std::isfinite( config.occupancyFull ) &&
++			config.occupancyStart >= 0.0 &&
++			config.occupancyFull > config.occupancyStart &&
++			config.occupancyFull <= 1.0 &&
++			std::isfinite( config.broadFieldStart ) &&
++			std::isfinite( config.broadFieldFull ) &&
++			config.broadFieldStart >= 0.0 &&
++			config.broadFieldFull > config.broadFieldStart &&
++			config.broadFieldFull <= 1.0 &&
++			std::isfinite( config.meanProtectionStart ) &&
++			std::isfinite( config.meanProtectionFull ) &&
++			config.meanProtectionStart >= 0.0 &&
++			config.meanProtectionFull > config.meanProtectionStart &&
++			config.meanProtectionFull <= 1.0 &&
++			std::isfinite( config.maximumBroadFieldProtection ) &&
++			config.maximumBroadFieldProtection >= 0.0 &&
++			config.maximumBroadFieldProtection <= 1.0 &&
++			std::isfinite( config.deadbandNits ) &&
++			config.deadbandNits >= 0.0 &&
++			std::isfinite( config.directionHysteresisNits ) &&
++			config.directionHysteresisNits >= 0.0 &&
++			std::isfinite( config.reductionDwellSeconds ) &&
++			config.reductionDwellSeconds >= 0.0 &&
++			std::isfinite( config.restorationDwellSeconds ) &&
++			config.restorationDwellSeconds >= 0.0 &&
++			finitePositive( config.reductionTimeConstantSeconds ) &&
++			finitePositive( config.restorationTimeConstantSeconds ) &&
++			std::isfinite( config.sceneCutMeanDelta ) &&
++			config.sceneCutMeanDelta > 0.0 &&
++			config.sceneCutMeanDelta <= 1.0 &&
++			std::isfinite( config.sceneCutPeakDelta ) &&
++			config.sceneCutPeakDelta > 0.0 &&
++			config.sceneCutPeakDelta <= 1.0 &&
++			finitePositive( config.maximumElapsedSeconds );
++	}
++
++	bool validAdaptiveStateTexels(
++		const AdaptiveStateTexels &state, const AdaptiveConfig &config )
++	{
++		if ( !validAdaptiveConfig( config ) )
++			return false;
++		const auto finiteUnit = []( double value )
++		{
++			return std::isfinite( value ) && value >= 0.0 && value <= 1.0;
++		};
++		const auto finiteNits = [&]( double value )
++		{
++			return std::isfinite( value ) &&
++				value >= config.efficientCeilingNits &&
++				value <= config.outputPeakNits;
++		};
++		const bool validDirection =
++			state.pendingDirection == -1.0 ||
++			state.pendingDirection == 0.0 ||
++			state.pendingDirection == 1.0;
++		const bool validInitialized =
++			state.initialized == 0.0 || state.initialized == 1.0;
++		return finiteNits( state.contentNits ) &&
++			finiteUnit( state.previousMean ) &&
++			finiteUnit( state.previousPeak ) &&
++			std::isfinite( state.pendingSeconds ) &&
++			state.pendingSeconds >= 0.0 &&
++			validDirection &&
++			validInitialized &&
++			finiteNits( state.desiredNits ) &&
++			finiteUnit( state.validCoverage );
++	}
++
++	SceneStats sanitizeSceneStats( const SceneStats &stats )
++	{
++		return {
++			finiteClamped( stats.mean, 0.0, 1.0 ),
++			finiteClamped( stats.upperOccupancy, 0.0, 1.0 ),
++			finiteClamped( stats.approximatePeak, 0.0, 1.0 ),
++			finiteClamped( stats.broadFieldLoad, 0.0, 1.0 ),
++			finiteClamped( stats.validCoverage, 0.0, 1.0 ),
++		};
++	}
++
++	bool validSceneStats( const SceneStats &stats )
++	{
++		const auto validUnit = []( double value )
++		{
++			return std::isfinite( value ) && value >= 0.0 && value <= 1.0;
++		};
++		return validUnit( stats.mean ) &&
++			validUnit( stats.upperOccupancy ) &&
++			validUnit( stats.approximatePeak ) &&
++			validUnit( stats.broadFieldLoad ) &&
++			validUnit( stats.validCoverage );
++	}
++
++	double desiredContentCeilingNits( const SceneStats &rawStats, const AdaptiveConfig &config )
++	{
++		if ( !validAdaptiveConfig( config ) )
++			return safeEfficientCeiling( config );
++		if ( !validSceneStats( rawStats ) )
++			return config.efficientCeilingNits;
++
++		const SceneStats stats = rawStats;
++		if ( !config.enabled || stats.validCoverage < config.minimumValidCoverage )
++			return config.efficientCeilingNits;
++
++		// A high peak creates headroom demand. Sparse upper-range occupancy
++		// confirms that the peak represents more than one unstable sample.
++		const double peakSignal = smoothstep(
++			config.peakStart, config.peakFull, stats.approximatePeak );
++		const double occupancySignal = smoothstep(
++			config.occupancyStart, config.occupancyFull, stats.upperOccupancy );
++		const double highlightDemand = peakSignal *
++			( GAMESCOPE_AUTO_HDR_HIGHLIGHT_PEAK_WEIGHT +
++			  GAMESCOPE_AUTO_HDR_HIGHLIGHT_OCCUPANCY_WEIGHT * occupancySignal );
++
++		// Bright fields reduce only the extra highlight headroom. They never
++		// reduce the established efficient-mode ceiling. Using the maximum of
++		// two smooth signals avoids a hard threshold when either scene mean or
++		// analyzed bright-area load crosses a boundary.
++		const double broadFieldSignal = smoothstep(
++			config.broadFieldStart, config.broadFieldFull, stats.broadFieldLoad );
++		const double meanSignal = smoothstep(
++			config.meanProtectionStart, config.meanProtectionFull, stats.mean );
++		const double protectionSignal = std::max( broadFieldSignal, meanSignal );
++		const double protection =
++			config.maximumBroadFieldProtection * protectionSignal;
++		const double usableHeadroom = highlightDemand * ( 1.0 - protection );
++
++		return std::clamp(
++			config.efficientCeilingNits +
++				( config.outputPeakNits - config.efficientCeilingNits ) * usableHeadroom,
++			config.efficientCeilingNits,
++			config.outputPeakNits );
++	}
++
++	double sceneCutSignal( const SceneStats &current, const SceneStats &previous,
++		const AdaptiveConfig &config )
++	{
++		if ( !validAdaptiveConfig( config ) ||
++			!validSceneStats( current ) ||
++			!validSceneStats( previous ) )
++			return 0.0;
++
++		const double meanDelta = std::abs( current.mean - previous.mean );
++		const double peakDelta =
++			std::abs( current.approximatePeak - previous.approximatePeak );
++		const double meanSignal = smoothstep(
++			GAMESCOPE_AUTO_HDR_SCENE_CUT_LOWER_FRACTION *
++				config.sceneCutMeanDelta,
++			config.sceneCutMeanDelta,
++			meanDelta );
++		const double peakSignal = smoothstep(
++			GAMESCOPE_AUTO_HDR_SCENE_CUT_LOWER_FRACTION *
++				config.sceneCutPeakDelta,
++			config.sceneCutPeakDelta,
++			peakDelta );
++		return std::max( meanSignal, peakSignal );
++	}
++
++	void AdaptiveController::reset()
++	{
++		m_contentCeilingNits = 0.0;
++		m_pendingSeconds = 0.0;
++		m_previousStats = {};
++		m_pendingDirection = Direction::None;
++		m_initialized = false;
++		m_havePreviousStats = false;
++	}
++
++	void AdaptiveController::reset( double contentCeilingNits )
++	{
++		reset();
++		if ( std::isfinite( contentCeilingNits ) && contentCeilingNits > 0.0 )
++		{
++			m_contentCeilingNits = contentCeilingNits;
++			m_initialized = true;
++		}
++	}
++
++	AdaptiveResult AdaptiveController::update(
++		const FrameInput &input, const AdaptiveConfig &config )
++	{
++		const double safeCeiling = safeEfficientCeiling( config );
++		if ( !validAdaptiveConfig( config ) )
++		{
++			reset( safeCeiling );
++			return { safeCeiling, safeCeiling, false, false, FreezeReason::InvalidConfig };
++		}
++
++		if ( !config.enabled )
++		{
++			reset( config.efficientCeilingNits );
++			return {
++				config.efficientCeilingNits,
++				config.efficientCeilingNits,
++				false,
++				false,
++				FreezeReason::Disabled,
++			};
++		}
++
++		if ( !m_initialized )
++		{
++			m_contentCeilingNits = config.efficientCeilingNits;
++			m_initialized = true;
++		}
++		m_contentCeilingNits = std::clamp(
++			m_contentCeilingNits, config.efficientCeilingNits, config.outputPeakNits );
++
++		const SceneStats stats = input.stats;
++		const double desired = validSceneStats( stats )
++			? desiredContentCeilingNits( stats, config )
++			: m_contentCeilingNits;
++		auto frozen = [&]( FreezeReason reason )
++		{
++			return AdaptiveResult{
++				m_contentCeilingNits,
++				desired,
++				false,
++				false,
++				reason,
++			};
++		};
++
++		if ( std::isfinite( input.elapsedSeconds ) &&
++			input.elapsedSeconds > config.maximumElapsedSeconds )
++		{
++			// A suspend, stall, or missing presentation invalidates temporal
++			// history. Return to Efficient and require a fresh stable sequence.
++			const bool changed =
++				m_contentCeilingNits != config.efficientCeilingNits;
++			reset();
++			m_contentCeilingNits = config.efficientCeilingNits;
++			return {
++				config.efficientCeilingNits,
++				desired,
++				changed,
++				false,
++				FreezeReason::ExcessiveElapsedTime,
++			};
++		}
++		if ( !validSceneStats( stats ) )
++		{
++			m_pendingDirection = Direction::None;
++			m_pendingSeconds = 0.0;
++			return frozen( FreezeReason::InvalidSceneStats );
++		}
++		if ( input.transitional )
++		{
++			m_pendingDirection = Direction::None;
++			m_pendingSeconds = 0.0;
++			return frozen( FreezeReason::TransitionalFrame );
++		}
++		if ( stats.validCoverage < config.minimumValidCoverage )
++		{
++			m_pendingDirection = Direction::None;
++			m_pendingSeconds = 0.0;
++			return frozen( FreezeReason::InsufficientCoverage );
++		}
++		if ( !std::isfinite( input.elapsedSeconds ) || input.elapsedSeconds <= 0.0 )
++			return frozen( FreezeReason::InvalidElapsedTime );
++		if ( input.duplicated )
++			return frozen( FreezeReason::DuplicatedFrame );
++		double cutSignal = 0.0;
++		if ( m_havePreviousStats )
++			cutSignal = sceneCutSignal( stats, m_previousStats, config );
++		m_previousStats = stats;
++		m_havePreviousStats = true;
++
++		if ( cutSignal > 0.0 )
++		{
++			m_pendingDirection = Direction::None;
++			m_pendingSeconds = 0.0;
++			if ( desired < m_contentCeilingNits )
++			{
++				// Scene transitions may shed stale headroom immediately, but
++				// the smooth cut signal avoids a binary threshold. A full cut
++				// reaches the lower target; restoration never uses this path.
++				m_contentCeilingNits = std::clamp(
++					m_contentCeilingNits +
++						cutSignal * ( desired - m_contentCeilingNits ),
++					config.efficientCeilingNits,
++					config.outputPeakNits );
++				return {
++					m_contentCeilingNits,
++					desired,
++					true,
++					true,
++					FreezeReason::None,
++				};
++			}
++		}
++
++		const double difference = desired - m_contentCeilingNits;
++		if ( std::abs( difference ) <= config.deadbandNits )
++		{
++			m_pendingDirection = Direction::None;
++			m_pendingSeconds = 0.0;
++			return frozen( FreezeReason::Deadband );
++		}
++
++		const Direction direction =
++			difference < 0.0 ? Direction::Reduce : Direction::Restore;
++		if ( m_pendingDirection != Direction::None &&
++			direction != m_pendingDirection &&
++			std::abs( difference ) <=
++				config.deadbandNits + config.directionHysteresisNits )
++		{
++			return frozen( FreezeReason::Hysteresis );
++		}
++		if ( direction != m_pendingDirection )
++		{
++			m_pendingDirection = direction;
++			m_pendingSeconds = input.elapsedSeconds;
++		}
++		else
++		{
++			m_pendingSeconds += input.elapsedSeconds;
++		}
++
++		const double dwell = direction == Direction::Reduce
++			? config.reductionDwellSeconds
++			: config.restorationDwellSeconds;
++		if ( m_pendingSeconds < dwell )
++			return frozen( FreezeReason::Dwell );
++
++		const double timeConstant = direction == Direction::Reduce
++			? config.reductionTimeConstantSeconds
++			: config.restorationTimeConstantSeconds;
++		const double blend = 1.0 - std::exp( -input.elapsedSeconds / timeConstant );
++		m_contentCeilingNits = std::clamp(
++			m_contentCeilingNits + blend * difference,
++			config.efficientCeilingNits,
++			config.outputPeakNits );
++
++		return {
++			m_contentCeilingNits,
++			desired,
++			true,
++			cutSignal > 0.0,
++			FreezeReason::None,
++		};
++	}
++
++	double AdaptiveController::contentCeilingNits() const
++	{
++		return m_contentCeilingNits;
++	}
++
++	bool AdaptiveController::initialized() const
++	{
++		return m_initialized;
++	}
++}
+diff --git a/src/AutoHDRAdaptive.h b/src/AutoHDRAdaptive.h
+new file mode 100644
+index 00000000..b2f86e03
+--- /dev/null
++++ b/src/AutoHDRAdaptive.h
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#pragma once
++
++#include <cstddef>
++#include <cstdint>
++
++#include "shaders/auto_hdr_adaptive_constants.h"
++
++namespace gamescope::autohdr
++{
++	struct AnalysisGrid
++	{
++		uint32_t width = 0;
++		uint32_t height = 0;
++	};
++
++	struct SceneSample
++	{
++		// Luminance is normalized to the declared SDR input range. Coverage is
++		// the visible base-layer contribution after bounds and alpha handling.
++		double luminance = 0.0;
++		double coverage = 0.0;
++	};
++
++	struct SceneStats
++	{
++		// All scene values are normalized to the SDR input range [0, 1].
++		double mean = 0.0;
++		double upperOccupancy = 0.0;
++		double approximatePeak = 0.0;
++		double broadFieldLoad = 0.0;
++		double validCoverage = 0.0;
++	};
++
++	struct AdaptiveConfig
++	{
++		bool enabled = false;
++		double efficientCeilingNits = GAMESCOPE_AUTO_HDR_DEFAULT_EFFICIENT_NITS;
++		double outputPeakNits = GAMESCOPE_AUTO_HDR_DEFAULT_EFFICIENT_NITS;
++
++		// Development constants are deliberately explicit so device testing can
++		// tune policy without changing the controller structure. They were
++		// independently selected from normalized scene quantities.
++		double minimumValidCoverage = GAMESCOPE_AUTO_HDR_MINIMUM_VALID_COVERAGE;
++		double peakStart = GAMESCOPE_AUTO_HDR_PEAK_START;
++		double peakFull = GAMESCOPE_AUTO_HDR_PEAK_FULL;
++		double occupancyStart = GAMESCOPE_AUTO_HDR_OCCUPANCY_START;
++		double occupancyFull = GAMESCOPE_AUTO_HDR_OCCUPANCY_FULL;
++		double broadFieldStart = GAMESCOPE_AUTO_HDR_BROAD_FIELD_START;
++		double broadFieldFull = GAMESCOPE_AUTO_HDR_BROAD_FIELD_FULL;
++		double meanProtectionStart = GAMESCOPE_AUTO_HDR_MEAN_PROTECTION_START;
++		double meanProtectionFull = GAMESCOPE_AUTO_HDR_MEAN_PROTECTION_FULL;
++		double maximumBroadFieldProtection =
++			GAMESCOPE_AUTO_HDR_MAXIMUM_BROAD_FIELD_PROTECTION;
++		double deadbandNits = GAMESCOPE_AUTO_HDR_DEADBAND_NITS;
++		double directionHysteresisNits =
++			GAMESCOPE_AUTO_HDR_DIRECTION_HYSTERESIS_NITS;
++		double reductionDwellSeconds =
++			GAMESCOPE_AUTO_HDR_REDUCTION_DWELL_SECONDS;
++		double restorationDwellSeconds =
++			GAMESCOPE_AUTO_HDR_RESTORATION_DWELL_SECONDS;
++		double reductionTimeConstantSeconds =
++			GAMESCOPE_AUTO_HDR_REDUCTION_TIME_CONSTANT_SECONDS;
++		double restorationTimeConstantSeconds =
++			GAMESCOPE_AUTO_HDR_RESTORATION_TIME_CONSTANT_SECONDS;
++		double sceneCutMeanDelta = GAMESCOPE_AUTO_HDR_SCENE_CUT_MEAN_DELTA;
++		double sceneCutPeakDelta = GAMESCOPE_AUTO_HDR_SCENE_CUT_PEAK_DELTA;
++		double maximumElapsedSeconds =
++			GAMESCOPE_AUTO_HDR_MAXIMUM_ELAPSED_SECONDS;
++	};
++
++	struct FrameInput
++	{
++		SceneStats stats;
++		double elapsedSeconds = 0.0;
++		bool duplicated = false;
++		bool transitional = false;
++	};
++
++	// CPU representation of the two RGBA32F temporal-state texels. It exists
++	// to unit-test the exact fail-closed policy used by the production shader.
++	struct AdaptiveStateTexels
++	{
++		double contentNits = 0.0;
++		double previousMean = 0.0;
++		double previousPeak = 0.0;
++		double pendingSeconds = 0.0;
++		double pendingDirection = 0.0;
++		double initialized = 0.0;
++		double desiredNits = 0.0;
++		double validCoverage = 0.0;
++	};
++
++	enum class FreezeReason
++	{
++		None,
++		Disabled,
++		InvalidConfig,
++		InvalidSceneStats,
++		InvalidElapsedTime,
++		ExcessiveElapsedTime,
++		DuplicatedFrame,
++		TransitionalFrame,
++		InsufficientCoverage,
++		Deadband,
++		Hysteresis,
++		Dwell,
++	};
++
++	struct AdaptiveResult
++	{
++		double contentCeilingNits = 0.0;
++		double desiredCeilingNits = 0.0;
++		bool updated = false;
++		bool sceneCut = false;
++		FreezeReason freezeReason = FreezeReason::None;
++	};
++
++	// The analysis grid covers the final output frame, including uncovered
++	// regions, so validCoverage describes the visible game contribution.
++	AnalysisGrid sceneAnalysisGrid( uint32_t outputWidth, uint32_t outputHeight );
++	SceneSample sanitizeSceneSample( const SceneSample &sample );
++	SceneStats analyzeSceneSamples( const SceneSample *samples, std::size_t sampleCount );
++	bool validAdaptiveConfig( const AdaptiveConfig &config );
++	bool validAdaptiveStateTexels(
++		const AdaptiveStateTexels &state, const AdaptiveConfig &config );
++	bool validSceneStats( const SceneStats &stats );
++	SceneStats sanitizeSceneStats( const SceneStats &stats );
++	double desiredContentCeilingNits( const SceneStats &stats, const AdaptiveConfig &config );
++	double sceneCutSignal( const SceneStats &current, const SceneStats &previous,
++		const AdaptiveConfig &config );
++
++	class AdaptiveController
++	{
++	public:
++		void reset();
++		void reset( double contentCeilingNits );
++		AdaptiveResult update( const FrameInput &input, const AdaptiveConfig &config );
++
++		double contentCeilingNits() const;
++		bool initialized() const;
++
++	private:
++		enum class Direction
++		{
++			None,
++			Reduce,
++			Restore,
++		};
++
++		double m_contentCeilingNits = 0.0;
++		double m_pendingSeconds = 0.0;
++		SceneStats m_previousStats;
++		Direction m_pendingDirection = Direction::None;
++		bool m_initialized = false;
++		bool m_havePreviousStats = false;
++	};
++}
+diff --git a/src/AutoHDRRootProperties.h b/src/AutoHDRRootProperties.h
+index 2006df0c..e0139549 100644
+--- a/src/AutoHDRRootProperties.h
++++ b/src/AutoHDRRootProperties.h
+@@ -10,17 +10,55 @@ namespace gamescope::autohdr
+ 	inline constexpr std::string_view SupportedAtomName = "GAMESCOPE_HDR_ITM_SUPPORTED";
+ 	inline constexpr std::string_view EnableAtomName = "GAMESCOPE_HDR_ITM_ENABLE";
+ 	inline constexpr std::string_view ActiveFeedbackAtomName = "GAMESCOPE_AUTO_HDR_ACTIVE_FEEDBACK";
++	inline constexpr std::string_view SupportedModesAtomName =
++		"GAMESCOPE_HDR_ITM_SUPPORTED_MODES";
++	inline constexpr std::string_view ModeAtomName = "GAMESCOPE_HDR_ITM_MODE";
++	inline constexpr std::string_view EffectiveModeAtomName =
++		"GAMESCOPE_HDR_ITM_EFFECTIVE_MODE";
++
++	enum class Mode : uint32_t
++	{
++		Off = 0,
++		Efficient = 1,
++		HighQuality = 2,
++	};
++
++	inline constexpr uint32_t SupportedModes =
++		uint32_t( Mode::Efficient ) | uint32_t( Mode::HighQuality );
++
++	constexpr Mode sanitizeRequestedMode( uint32_t value )
++	{
++		return value == uint32_t( Mode::HighQuality )
++			? Mode::HighQuality
++			: Mode::Efficient;
++	}
+ 
+ 	struct RootPropertyValues
+ 	{
+ 		uint32_t supported;
+ 		uint32_t enabled;
+ 		uint32_t active;
++		uint32_t supportedModes;
++		uint32_t requestedMode;
++		uint32_t effectiveMode;
+ 	};
+ 
+-	constexpr RootPropertyValues initialRootPropertyValues( bool enabled )
++	constexpr RootPropertyValues initialRootPropertyValues(
++		bool enabled,
++		Mode requestedMode = Mode::Efficient,
++		bool highQualitySupported = false )
+ 	{
+-		return { 1u, enabled ? 1u : 0u, 0u };
++		return {
++			1u,
++			enabled ? 1u : 0u,
++			0u,
++			uint32_t( Mode::Efficient ) |
++				( highQualitySupported
++					? uint32_t( Mode::HighQuality )
++					: 0u ),
++			uint32_t( requestedMode ),
++			uint32_t( Mode::Off ),
++		};
+ 	}
+ 
+ 	constexpr bool activeFromLayerMask( uint32_t layerMask )
+diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
+index 7ee88f42..d387f1ba 100644
+--- a/src/Backends/DRMBackend.cpp
++++ b/src/Backends/DRMBackend.cpp
+@@ -3831,7 +3831,7 @@ namespace gamescope
+ 
+ 			compositeFrameInfo.rotationShaderOrientation = rotationShaderOrientation;
+ 
+-			std::optional oCompositeResult = vulkan_composite( &compositeFrameInfo, nullptr, !bNeedsFullComposite );
++			std::optional oCompositeResult = vulkan_composite( &compositeFrameInfo, nullptr, !bNeedsFullComposite, VulkanCompositePurpose::Presentation );
+ 
+ 			m_bWasCompositing = true;
+ 
+diff --git a/src/Backends/OpenVRBackend.cpp b/src/Backends/OpenVRBackend.cpp
+index 44740c43..728e769d 100644
+--- a/src/Backends/OpenVRBackend.cpp
++++ b/src/Backends/OpenVRBackend.cpp
+@@ -1708,7 +1708,7 @@ namespace gamescope
+         }
+         else
+         {
+-            std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false );
++            std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false, VulkanCompositePurpose::Presentation );
+             if ( !oCompositeResult )
+             {
+                 openvr_log.errorf( "vulkan_composite failed" );
+diff --git a/src/Backends/SDLBackend.cpp b/src/Backends/SDLBackend.cpp
+index 87bde7e2..39718e1b 100644
+--- a/src/Backends/SDLBackend.cpp
++++ b/src/Backends/SDLBackend.cpp
+@@ -341,7 +341,7 @@ namespace gamescope
+ 	int CSDLConnector::Present( const FrameInfo_t *pFrameInfo, bool bAsync )
+ 	{
+ 		// TODO: Resolve const crap
+-		std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false );
++		std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false, VulkanCompositePurpose::Presentation );
+ 		if ( !oCompositeResult )
+ 			return -EINVAL;
+ 
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index f06ab1b4..5dfd5818 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -1109,7 +1109,7 @@ namespace gamescope
+             }
+             else
+             {
+-                std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false );
++                std::optional oCompositeResult = vulkan_composite( (FrameInfo_t *)pFrameInfo, nullptr, false, VulkanCompositePurpose::Presentation );
+ 
+                 if ( !oCompositeResult )
+                 {
+diff --git a/src/main.cpp b/src/main.cpp
+index 5b2f7699..4e5d1e9b 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -145,6 +145,7 @@ const struct option *gamescope_options = (struct option[]){
+ 	{ "hdr-enabled", no_argument, nullptr, 0 },
+ 	{ "hdr-sdr-content-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-enabled", no_argument, nullptr, 0 },
++	{ "hdr-itm-mode", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-sdr-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-target-nits", required_argument, nullptr, 0 },
+ 	{ "hdr-itm-content-nits", required_argument, nullptr, 0 },
+@@ -213,6 +214,7 @@ const char usage[] =
+ 	"  --sdr-gamut-wideness           Set the 'wideness' of the gamut for SDR comment. 0 - 1.\n"
+ 	"  --hdr-sdr-content-nits         set the luminance of SDR content in nits. Default: 400 nits.\n"
+ 	"  --hdr-itm-enabled              enable SDR->HDR inverse tone mapping. only works for SDR input.\n"
++	"  --hdr-itm-mode                 select efficient or high-quality inverse tone mapping. Default: efficient.\n"
+ 	"  --hdr-itm-sdr-nits             set the luminance of SDR content in nits used as the input for the inverse tone mapping process.\n"
+ 	"                                 Default: 100 nits, Max: 1000 nits\n"
+ 	"  --hdr-itm-target-nits          set the target luminace of the inverse tone mapping process.\n"
+diff --git a/src/meson.build b/src/meson.build
+index b292c6eb..78f1eb27 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -60,6 +60,7 @@ else
+ endif
+ 
+ shader_src = [
++  'shaders/cs_auto_hdr_analyze.comp',
+   'shaders/cs_composite_blit.comp',
+   'shaders/cs_composite_blur.comp',
+   'shaders/cs_composite_blur_cond.comp',
+@@ -103,6 +104,7 @@ src = [
+   'Utils/Process.cpp',
+   'Script/Script.cpp',
+   'BufferMemo.cpp',
++  'AutoHDRAdaptive.cpp',
+   'AutoHDRPolicy.cpp',
+   'steamcompmgr.cpp',
+   'convar.cpp',
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 5e332d19..7cfad0e8 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -35,6 +35,7 @@
+ #include "wlr_end.hpp"
+ 
+ #include "rendervulkan.hpp"
++#include "AutoHDRAdaptive.h"
+ #include "ClientFormatPolicy.h"
+ #include "main.hpp"
+ #include "steamcompmgr.hpp"
+@@ -42,6 +43,7 @@
+ #include "Utils/Process.h"
+ 
+ #include "cs_composite_blit.h"
++#include "cs_auto_hdr_analyze.h"
+ #include "cs_composite_blur.h"
+ #include "cs_composite_blur_cond.h"
+ #include "cs_composite_rcas.h"
+@@ -124,6 +126,7 @@ static VkResult vulkan_load_module()
+ }
+ 
+ VulkanOutput_t g_output;
++static uint64_t s_vulkanOutputGeneration = 0;
+ 
+ uint32_t g_uCompositeDebug = 0u;
+ gamescope::ConVar<uint32_t> cv_composite_debug{ "composite_debug", 0, "Debug composition flags" };
+@@ -954,6 +957,8 @@ bool CVulkanDevice::createShaders()
+ 	};
+ 
+ 	std::array<ShaderInfo_t, SHADER_TYPE_COUNT> shaderInfos;
++	m_shaderModules.fill( VK_NULL_HANDLE );
++	m_bAutoHDRAdaptiveShaderAvailable = false;
+ #define SHADER(type, array) shaderInfos[SHADER_TYPE_##type] = {array , sizeof(array)}
+ 	SHADER(BLIT, cs_composite_blit);
+ 	SHADER(BLUR, cs_composite_blur);
+@@ -971,6 +976,7 @@ bool CVulkanDevice::createShaders()
+ 		SHADER(NIS, cs_nis);
+ 	}
+ 	SHADER(RGB_TO_NV12, cs_rgb_to_nv12);
++	SHADER(AUTO_HDR_ANALYZE, cs_auto_hdr_analyze);
+ #undef SHADER
+ 
+ 	for (uint32_t i = 0; i < shaderInfos.size(); i++)
+@@ -984,9 +990,19 @@ bool CVulkanDevice::createShaders()
+ 		VkResult res = vk.CreateShaderModule(device(), &shaderCreateInfo, nullptr, &m_shaderModules[i]);
+ 		if ( res != VK_SUCCESS )
+ 		{
++			if ( i == SHADER_TYPE_AUTO_HDR_ANALYZE )
++			{
++				vk_errorf(
++					res,
++					"Auto HDR High Quality shader unavailable; Efficient remains active" );
++				m_shaderModules[i] = VK_NULL_HANDLE;
++				continue;
++			}
+ 			vk_errorf( res, "vkCreateShaderModule failed" );
+ 			return false;
+ 		}
++		if ( i == SHADER_TYPE_AUTO_HDR_ANALYZE )
++			m_bAutoHDRAdaptiveShaderAvailable = true;
+ 	}
+ 
+ 	return true;
+@@ -1097,9 +1113,39 @@ VkSampler CVulkanDevice::sampler( SamplerState key )
+ 	return ret;
+ }
+ 
+-VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation)
++bool CVulkanDevice::supportsFormatFeatures(
++	VkFormat format, VkFormatFeatureFlags features )
+ {
+-	const std::array<VkSpecializationMapEntry, 8> specializationEntries = {{
++	VkFormatProperties properties = {};
++	vk.GetPhysicalDeviceFormatProperties( physDev(), format, &properties );
++	if ( ( properties.optimalTilingFeatures & features ) != features )
++		return false;
++
++	VkImageUsageFlags usage = 0;
++	if ( features & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT )
++		usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
++	if ( features & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT )
++		usage |= VK_IMAGE_USAGE_STORAGE_BIT;
++	if ( features & VK_FORMAT_FEATURE_TRANSFER_DST_BIT )
++		usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
++	VkPhysicalDeviceImageFormatInfo2 formatInfo = {
++		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
++		.format = format,
++		.type = VK_IMAGE_TYPE_2D,
++		.tiling = VK_IMAGE_TILING_OPTIMAL,
++		.usage = usage,
++		.flags = 0,
++	};
++	VkImageFormatProperties2 imageProperties = {
++		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
++	};
++	return vk.GetPhysicalDeviceImageFormatProperties2(
++		physDev(), &formatInfo, &imageProperties ) == VK_SUCCESS;
++}
++
++VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation, bool auto_hdr_adaptive)
++{
++	const std::array<VkSpecializationMapEntry, 9> specializationEntries = {{
+ 		{
+ 			.constantID = 0,
+ 			.offset     = sizeof(uint32_t) * 0,
+@@ -1143,6 +1189,11 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
+ 			.offset     = sizeof(uint32_t) * 7,
+ 			.size       = sizeof(uint32_t)
+ 		},
++		{
++			.constantID = 8,
++			.offset     = sizeof(uint32_t) * 8,
++			.size       = sizeof(uint32_t)
++		},
+ 	}};
+ 
+ 	struct {
+@@ -1154,6 +1205,7 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
+ 		uint32_t output_eotf;
+ 		uint32_t auto_hdr_layer_mask;
+ 		uint32_t rotation;
++		uint32_t auto_hdr_adaptive;
+ 	} specializationData = {
+ 		.layerCount   = layerCount,
+ 		.ycbcrMask    = ycbcrMask,
+@@ -1163,6 +1215,7 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
+ 		.output_eotf = output_eotf,
+ 		.auto_hdr_layer_mask = auto_hdr_layer_mask,
+ 		.rotation = rotation,
++		.auto_hdr_adaptive = auto_hdr_adaptive ? 1u : 0u,
+ 	};
+ 
+ 	VkSpecializationInfo specializationInfo = {
+@@ -1200,7 +1253,7 @@ void CVulkanDevice::compileAllPipelines()
+ 	pthread_setname_np( pthread_self(), "gamescope-shdr" );
+ 
+ 	std::array<PipelineInfo_t, SHADER_TYPE_COUNT> pipelineInfos;
+-#define SHADER(type, layer_count, max_ycbcr, blur_layers, need_rotations) pipelineInfos[SHADER_TYPE_##type] = {SHADER_TYPE_##type, layer_count, max_ycbcr, blur_layers, 0, 0, 0, 0, (need_rotations) && g_bRotationShaderRequested ? 3u : 0u}
++#define SHADER(type, layer_count, max_ycbcr, blur_layers, need_rotations) pipelineInfos[SHADER_TYPE_##type] = {SHADER_TYPE_##type, layer_count, max_ycbcr, blur_layers, 0, 0, 0, 0, 0, (need_rotations) && g_bRotationShaderRequested ? 3u : 0u}
+ 	SHADER(BLIT, k_nMaxLayers, k_nMaxYcbcrMask_ToPreCompile, 1, true);
+ 	SHADER(BLUR, k_nMaxLayers, k_nMaxYcbcrMask_ToPreCompile, k_nMaxBlurLayers, true);
+ 	SHADER(BLUR_COND, k_nMaxLayers, k_nMaxYcbcrMask_ToPreCompile, k_nMaxBlurLayers, true);
+@@ -1209,9 +1262,13 @@ void CVulkanDevice::compileAllPipelines()
+ 	SHADER(EASU, 1, 1, 1, false);
+ 	SHADER(NIS, 1, 1, 1, false);
+ 	SHADER(RGB_TO_NV12, 1, 1, 1, true);
++	SHADER(AUTO_HDR_ANALYZE, 1, 1, 1, false);
+ #undef SHADER
+ 
+ 	for (auto& info : pipelineInfos) {
++		if ( info.shaderType == SHADER_TYPE_AUTO_HDR_ANALYZE &&
++			 !m_bAutoHDRAdaptiveShaderAvailable )
++			continue;
+ 		for (uint32_t layerCount = 1; layerCount <= info.layerCount; layerCount++) {
+ 			for (uint32_t ycbcrMask = 0; ycbcrMask < info.ycbcrMask; ycbcrMask++) {
+ 				for (uint32_t blur_layers = 1; blur_layers <= info.blurLayerCount; blur_layers++) {
+@@ -1221,12 +1278,12 @@ void CVulkanDevice::compileAllPipelines()
+ 						if (blur_layers > layerCount)
+ 							continue;
+ 
+-						VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.autoHDRLayerMask, rotation);
++						VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.autoHDRLayerMask, rotation, info.autoHDRAdaptive != 0);
+ 						if ( newPipeline == VK_NULL_HANDLE )
+ 							continue;
+ 						{
+ 							std::lock_guard<std::mutex> lock(m_pipelineMutex);
+-							PipelineInfo_t key = {info.shaderType, layerCount, ycbcrMask, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.autoHDRLayerMask, rotation};
++							PipelineInfo_t key = {info.shaderType, layerCount, ycbcrMask, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.autoHDRLayerMask, info.autoHDRAdaptive, rotation};
+ 							auto result = m_pipelineMap.emplace(std::make_pair(key, newPipeline));
+ 							if (!result.second)
+ 								vk.DestroyPipeline(device(), newPipeline, nullptr);
+@@ -1240,14 +1297,16 @@ void CVulkanDevice::compileAllPipelines()
+ 
+ extern bool g_bSteamIsActiveWindow;
+ 
+-VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation)
++VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation, bool auto_hdr_adaptive, bool *used_requested_auto_hdr)
+ {
++	if ( used_requested_auto_hdr )
++		*used_requested_auto_hdr = true;
+ 	uint32_t effective_debug = g_uCompositeDebug;
+ 	if ( g_bSteamIsActiveWindow )
+ 		effective_debug &= ~(CompositeDebugFlag::Heatmap | CompositeDebugFlag::Heatmap_MSWCG | CompositeDebugFlag::Heatmap_Hard);
+ 
+ 	std::lock_guard<std::mutex> lock(m_pipelineMutex);
+-	PipelineInfo_t key = {type, layerCount, ycbcrMask, blur_layers, effective_debug, colorspace_mask, output_eotf, auto_hdr_layer_mask, rotation};
++	PipelineInfo_t key = {type, layerCount, ycbcrMask, blur_layers, effective_debug, colorspace_mask, output_eotf, auto_hdr_layer_mask, auto_hdr_adaptive ? 1u : 0u, rotation};
+ 	auto search = m_pipelineMap.find(key);
+ 	if (search != m_pipelineMap.end())
+ 		return search->second;
+@@ -1257,13 +1316,52 @@ VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_
+ 		if ( auto_hdr_layer_mask == 0 )
+ 			return VK_NULL_HANDLE;
+ 
++		if ( auto_hdr_adaptive )
++		{
++			PipelineInfo_t efficientKey = key;
++			efficientKey.autoHDRAdaptive = 0;
++			auto efficient = m_pipelineMap.find( efficientKey );
++			if ( efficient != m_pipelineMap.end() )
++			{
++				if ( used_requested_auto_hdr )
++					*used_requested_auto_hdr = false;
++				return efficient->second;
++			}
++			if ( !m_pipelineFailures.contains( efficientKey ) )
++			{
++				VkPipeline efficientPipeline = compilePipeline(
++					layerCount,
++					ycbcrMask,
++					type,
++					blur_layers,
++					effective_debug,
++					colorspace_mask,
++					output_eotf,
++					auto_hdr_layer_mask,
++					rotation,
++					false );
++				if ( efficientPipeline != VK_NULL_HANDLE )
++				{
++					m_pipelineMap.emplace(
++						efficientKey, efficientPipeline );
++					if ( used_requested_auto_hdr )
++						*used_requested_auto_hdr = false;
++					return efficientPipeline;
++				}
++				m_pipelineFailures.emplace( efficientKey );
++			}
++		}
++
+ 		PipelineInfo_t fallbackKey = key;
+ 		fallbackKey.autoHDRLayerMask = 0;
++		fallbackKey.autoHDRAdaptive = 0;
+ 		auto fallback = m_pipelineMap.find( fallbackKey );
++		if ( fallback != m_pipelineMap.end() && used_requested_auto_hdr )
++			*used_requested_auto_hdr = false;
+ 		return fallback != m_pipelineMap.end() ? fallback->second : VK_NULL_HANDLE;
+ 	}
+ 
+-	VkPipeline result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, auto_hdr_layer_mask, rotation);
++	VkPipeline result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, auto_hdr_layer_mask, rotation, auto_hdr_adaptive);
+ 	if ( result != VK_NULL_HANDLE )
+ 	{
+ 		m_pipelineMap.emplace( key, result );
+@@ -1277,16 +1375,58 @@ VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_
+ 		return VK_NULL_HANDLE;
+ 	}
+ 
++	if ( auto_hdr_adaptive )
++	{
++		PipelineInfo_t efficientKey = key;
++		efficientKey.autoHDRAdaptive = 0;
++		auto efficient = m_pipelineMap.find( efficientKey );
++		if ( efficient != m_pipelineMap.end() )
++		{
++			if ( used_requested_auto_hdr )
++				*used_requested_auto_hdr = false;
++			return efficient->second;
++		}
++		if ( !m_pipelineFailures.contains( efficientKey ) )
++		{
++			result = compilePipeline(
++				layerCount,
++				ycbcrMask,
++				type,
++				blur_layers,
++				effective_debug,
++				colorspace_mask,
++				output_eotf,
++				auto_hdr_layer_mask,
++				rotation,
++				false );
++			if ( result != VK_NULL_HANDLE )
++			{
++				m_pipelineMap.emplace( efficientKey, result );
++				if ( used_requested_auto_hdr )
++					*used_requested_auto_hdr = false;
++				vk_log.errorf(
++					"Auto HDR High Quality pipeline unavailable; using Efficient" );
++				return result;
++			}
++			m_pipelineFailures.emplace( efficientKey );
++		}
++	}
++
+ 	vk_log.errorf( "Auto HDR mask 0x%08x pipeline unavailable; using zero-mask fallback", auto_hdr_layer_mask );
+ 	PipelineInfo_t fallbackKey = key;
+ 	fallbackKey.autoHDRLayerMask = 0;
++	fallbackKey.autoHDRAdaptive = 0;
+ 	auto fallback = m_pipelineMap.find( fallbackKey );
+ 	if ( fallback != m_pipelineMap.end() )
++	{
++		if ( used_requested_auto_hdr )
++			*used_requested_auto_hdr = false;
+ 		return fallback->second;
++	}
+ 	if ( m_pipelineFailures.contains( fallbackKey ) )
+ 		return VK_NULL_HANDLE;
+ 
+-	result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, 0, rotation);
++	result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, 0, rotation, false);
+ 	if ( result == VK_NULL_HANDLE )
+ 	{
+ 		m_pipelineFailures.emplace( fallbackKey );
+@@ -1294,6 +1434,8 @@ VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_
+ 		return VK_NULL_HANDLE;
+ 	}
+ 	m_pipelineMap.emplace( fallbackKey, result );
++	if ( used_requested_auto_hdr )
++		*used_requested_auto_hdr = false;
+ 	return result;
+ }
+ 
+@@ -1999,6 +2141,53 @@ void CVulkanCmdBuffer::insertBarrier(bool flush)
+ 									0, 0, nullptr, 0, nullptr, barriers.size(), barriers.data());
+ }
+ 
++void CVulkanCmdBuffer::insertAdaptiveStateBarrier(
++	CVulkanTexture *previousState, CVulkanTexture *nextState)
++{
++	if ( !previousState || !nextState )
++		return;
++
++	const VkImageSubresourceRange range = {
++		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++		.baseMipLevel = 0,
++		.levelCount = 1,
++		.baseArrayLayer = 0,
++		.layerCount = 1,
++	};
++	const std::array<VkImageMemoryBarrier, 2> barriers = {{
++		{
++			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++			.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
++			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
++			.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
++			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
++			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++			.image = previousState->vkImage(),
++			.subresourceRange = range,
++		},
++		{
++			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
++			.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT,
++			.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
++			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
++			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++			.image = nextState->vkImage(),
++			.subresourceRange = range,
++		},
++	}};
++	m_device->vk.CmdPipelineBarrier(
++		m_cmdBuffer,
++		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++		0,
++		0, nullptr,
++		0, nullptr,
++		uint32_t( barriers.size() ), barriers.data() );
++}
++
+ CVulkanDevice g_device;
+ 
+ static bool allDMABUFsEqual( wlr_dmabuf_attributes *pDMA )
+@@ -3337,6 +3526,8 @@ bool vulkan_remake_swapchain( void )
+ 	VulkanOutput_t *pOutput = &g_output;
+ 	g_device.waitIdle();
+ 	g_device.vk.QueueWaitIdle( g_device.queue() );
++	s_vulkanOutputGeneration++;
++	vulkan_auto_hdr_adaptive_invalidate();
+ 
+ 	pOutput->outputImages.clear();
+ 
+@@ -3454,6 +3645,8 @@ bool vulkan_remake_output_images()
+ {
+ 	VulkanOutput_t *pOutput = &g_output;
+ 	g_device.waitIdle();
++	s_vulkanOutputGeneration++;
++	vulkan_auto_hdr_adaptive_invalidate();
+ 
+ 	pOutput->nOutImage = 0;
+ 
+@@ -4030,6 +4223,286 @@ static_assert( offsetof( RcasPushData_t, u_itmContentNits ) ==
+ static_assert( sizeof( RcasPushData_t ) ==
+ 	offsetof( RcasPushData_t, u_itmContentNits ) + sizeof( float ) );
+ 
++struct AutoHDRAnalysisPushData_t
++{
++	glm::mat3x4 sourceCTM;
++	glm::mat3x4 sourceTo2020;
++	vec2_t scale;
++	vec2_t offset;
++	uvec2_t sourceExtent;
++	uvec2_t displayExtent;
++	uvec2_t gridExtent;
++	uint32_t sourceColorspace;
++	uint32_t sourceAlphaMode;
++	uint32_t reset;
++	uint32_t transitional;
++	uint32_t duplicated;
++	float opacity;
++	float elapsedSeconds;
++	float efficientCeilingNits;
++	float outputPeakNits;
++
++	AutoHDRAnalysisPushData_t(
++		const FrameInfo_t *frameInfo,
++		uint32_t sourceLayer,
++		uvec2_t grid,
++		float elapsed,
++		bool shouldReset,
++		bool duplicatedFrame )
++		: sourceCTM{
++			1, 0, 0, 0,
++			0, 1, 0, 0,
++			0, 0, 1, 0 }
++		, sourceTo2020( frameInfo->autoHDRSourceTo2020 )
++		, scale( frameInfo->layers[sourceLayer].scale )
++		, offset( frameInfo->layers[sourceLayer].offsetPixelCenter() )
++		, sourceExtent{
++			frameInfo->layers[sourceLayer].tex->width(),
++			frameInfo->layers[sourceLayer].tex->height() }
++		, displayExtent{ currentOutputWidth, currentOutputHeight }
++		, gridExtent( grid )
++		, sourceColorspace( frameInfo->layers[sourceLayer].colorspace )
++		, sourceAlphaMode( uint32_t(
++			frameInfo->layers[sourceLayer].eAlphaBlendingMode ) )
++		, reset( shouldReset ? 1u : 0u )
++		, transitional( frameInfo->bFadingOut || frameInfo->blurLayer0 ? 1u : 0u )
++		, duplicated( duplicatedFrame ? 1u : 0u )
++		, opacity( frameInfo->layers[sourceLayer].opacity )
++		, elapsedSeconds( elapsed )
++		, efficientCeilingNits( get_hdr_itm_content_nits() )
++		, outputPeakNits( std::clamp(
++			g_flHDRItmTargetNits,
++			get_hdr_itm_content_nits(),
++			float( GAMESCOPE_AUTO_HDR_MAXIMUM_OUTPUT_NITS ) ) )
++	{
++		if ( frameInfo->layers[sourceLayer].ctm )
++			sourceCTM =
++				frameInfo->layers[sourceLayer].ctm->View<glm::mat3x4>();
++	}
++};
++
++static_assert( offsetof( AutoHDRAnalysisPushData_t, sourceTo2020 ) ==
++	offsetof( AutoHDRAnalysisPushData_t, sourceCTM ) + sizeof( glm::mat3x4 ) );
++static_assert( offsetof( AutoHDRAnalysisPushData_t, scale ) ==
++	offsetof( AutoHDRAnalysisPushData_t, sourceTo2020 ) + sizeof( glm::mat3x4 ) );
++static_assert( offsetof( AutoHDRAnalysisPushData_t, sourceExtent ) ==
++	offsetof( AutoHDRAnalysisPushData_t, offset ) + sizeof( vec2_t ) );
++static_assert( sizeof( AutoHDRAnalysisPushData_t ) ==
++	offsetof( AutoHDRAnalysisPushData_t, outputPeakNits ) + sizeof( float ) );
++#pragma pack(pop)
++
++struct AutoHDRAdaptiveRuntime_t
++{
++	uint64_t sourceKey = 0;
++	uint64_t contentSerial = 0;
++	uint64_t outputKey = 0;
++	uint64_t calibrationSerial = 0;
++	uint64_t outputGeneration = 0;
++	uint32_t sourceColorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU;
++	EOTF outputEOTF = EOTF_Count;
++	float efficientCeilingNits = 0.0f;
++	float outputPeakNits = 0.0f;
++	uint32_t outputWidth = 0;
++	uint32_t outputHeight = 0;
++	uint64_t lastPresentationNanos = 0;
++	bool stateSubmitted = false;
++	bool allocationUnavailable = false;
++	bool activeLogged = false;
++	std::optional<bool> capabilitySupported;
++
++	void resetTracking()
++	{
++		sourceKey = 0;
++		contentSerial = 0;
++		outputKey = 0;
++		calibrationSerial = 0;
++		outputGeneration = 0;
++		lastPresentationNanos = 0;
++		stateSubmitted = false;
++		activeLogged = false;
++	}
++};
++
++static AutoHDRAdaptiveRuntime_t s_autoHDRAdaptiveRuntime;
++static bool s_autoHDRAdaptiveEffective = false;
++
++bool vulkan_auto_hdr_adaptive_supported()
++{
++	if ( !g_device.device() )
++		return false;
++	if ( s_autoHDRAdaptiveRuntime.allocationUnavailable )
++		return false;
++	if ( s_autoHDRAdaptiveRuntime.capabilitySupported )
++		return *s_autoHDRAdaptiveRuntime.capabilitySupported;
++	constexpr VkFormatFeatureFlags requiredFeatures =
++		VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
++		VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
++		VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
++	const bool supported =
++		g_device.supportsAutoHDRAdaptiveShader() &&
++		g_device.supportsFormatFeatures(
++			VK_FORMAT_R32G32B32A32_SFLOAT, requiredFeatures );
++	s_autoHDRAdaptiveRuntime.capabilitySupported = supported;
++	return supported;
++}
++
++bool vulkan_auto_hdr_adaptive_effective()
++{
++	return s_autoHDRAdaptiveEffective;
++}
++
++void vulkan_auto_hdr_adaptive_invalidate()
++{
++	// Both callers are presentation-policy paths on the compositor thread.
++	// Auxiliary composites deliberately do not call this function.
++	s_autoHDRAdaptiveEffective = false;
++	s_autoHDRAdaptiveRuntime.resetTracking();
++}
++
++bool vulkan_auto_hdr_adaptive_frame_eligible( const FrameInfo_t *frameInfo )
++{
++	if ( !frameInfo ||
++		frameInfo->layerCount <= 0 ||
++		frameInfo->layerCount > k_nMaxLayers ||
++		currentOutputWidth == 0 ||
++		currentOutputHeight == 0 ||
++		frameInfo->autoHDRLayerMask == 0u ||
++		( frameInfo->autoHDRLayerMask &
++		  ( frameInfo->autoHDRLayerMask - 1u ) ) != 0u )
++		return false;
++
++	uint32_t sourceLayer = 0;
++	while ( sourceLayer < 32u &&
++			( frameInfo->autoHDRLayerMask & ( 1u << sourceLayer ) ) == 0u )
++		sourceLayer++;
++	if ( sourceLayer >= uint32_t( frameInfo->layerCount ) )
++		return false;
++
++	const FrameInfo_t::Layer_t &source = frameInfo->layers[sourceLayer];
++	if ( !source.tex || source.isYcbcr() ||
++		( source.colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR &&
++		  source.colorspace != GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB ) )
++		return false;
++
++	// Analysis must sample the same reconstruction as the final composite.
++	// Scaled sRGB LINEAR is shader-emulated and PIXEL uses a specialized path,
++	// so both conservatively fall back to Efficient.
++	return source.isScreenSize() ||
++		source.filter == GamescopeUpscaleFilter::NEAREST ||
++		( source.filter == GamescopeUpscaleFilter::LINEAR &&
++		  source.viewConvertsToLinearAutomatically() );
++}
++
++static bool ensure_auto_hdr_adaptive_state()
++{
++	if ( s_autoHDRAdaptiveRuntime.allocationUnavailable )
++		return false;
++	if ( g_output.autoHDRAdaptiveState[0] && g_output.autoHDRAdaptiveState[1] )
++		return true;
++	if ( !vulkan_auto_hdr_adaptive_supported() )
++	{
++		vk_log.errorf(
++			"Auto HDR High Quality unavailable: shader or RGBA32F capability missing" );
++		s_autoHDRAdaptiveRuntime.allocationUnavailable = true;
++		return false;
++	}
++
++	CVulkanTexture::createFlags flags;
++	flags.bSampled = true;
++	flags.bStorage = true;
++	flags.bTransferDst = true;
++	for ( auto &state : g_output.autoHDRAdaptiveState )
++	{
++		state = new CVulkanTexture;
++		if ( !state->BInit(
++				2, 1, 1, DRM_FORMAT_ABGR32323232F, flags ) )
++		{
++			vk_log.errorf(
++				"Auto HDR High Quality unavailable: state allocation failed" );
++			g_output.autoHDRAdaptiveState = {};
++			s_autoHDRAdaptiveRuntime.allocationUnavailable = true;
++			s_autoHDRAdaptiveRuntime.capabilitySupported = false;
++			return false;
++		}
++	}
++
++	auto initialization = g_device.commandBuffer();
++	if ( !initialization )
++	{
++		g_output.autoHDRAdaptiveState = {};
++		s_autoHDRAdaptiveRuntime.allocationUnavailable = true;
++		s_autoHDRAdaptiveRuntime.capabilitySupported = false;
++		return false;
++	}
++	for ( const auto &state : g_output.autoHDRAdaptiveState )
++		initialization->discardImage( state.get() );
++	// Transition both images from UNDEFINED to GENERAL before either can be
++	// fetched, then initialize them to a known invalid-but-finite state.
++	initialization->insertBarrier();
++	const VkClearColorValue clear = {};
++	const VkImageSubresourceRange range = {
++		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
++		.baseMipLevel = 0,
++		.levelCount = 1,
++		.baseArrayLayer = 0,
++		.layerCount = 1,
++	};
++	for ( const auto &state : g_output.autoHDRAdaptiveState )
++	{
++		g_device.vk.CmdClearColorImage(
++			initialization->rawBuffer(),
++			state->vkImage(),
++			VK_IMAGE_LAYOUT_GENERAL,
++			&clear,
++			1,
++			&range );
++	}
++	std::array<VkImageMemoryBarrier, 2> initializedBarriers;
++	for ( size_t i = 0; i < initializedBarriers.size(); i++ )
++	{
++		initializedBarriers[i] = {
++			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
++			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
++			.dstAccessMask =
++				VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
++			.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
++			.newLayout = VK_IMAGE_LAYOUT_GENERAL,
++			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
++			.image = g_output.autoHDRAdaptiveState[i]->vkImage(),
++			.subresourceRange = range,
++		};
++	}
++	g_device.vk.CmdPipelineBarrier(
++		initialization->rawBuffer(),
++		VK_PIPELINE_STAGE_TRANSFER_BIT,
++		VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
++		0,
++		0,
++		nullptr,
++		0,
++		nullptr,
++		uint32_t( initializedBarriers.size() ),
++		initializedBarriers.data() );
++	const uint64_t initializationSequence =
++		g_device.submit( std::move( initialization ) );
++	g_device.wait( initializationSequence );
++
++	g_output.autoHDRAdaptiveStateIndex = 0;
++	s_autoHDRAdaptiveRuntime.resetTracking();
++	return true;
++}
++
++static void bind_auto_hdr_adaptive_state(
++	CVulkanCmdBuffer *cmdBuffer, gamescope::Rc<CVulkanTexture> state )
++{
++	cmdBuffer->bindTexture( VKR_AUTO_HDR_STATE_SLOT, std::move( state ) );
++	cmdBuffer->setTextureSrgb( VKR_AUTO_HDR_STATE_SLOT, false );
++	cmdBuffer->setSamplerUnnormalized( VKR_AUTO_HDR_STATE_SLOT, false );
++	cmdBuffer->setSamplerNearest( VKR_AUTO_HDR_STATE_SLOT, true );
++}
++
++#pragma pack(push, 1)
+ struct NisPushData_t
+ {
+ 	NISConfig nisConfig;
+@@ -4131,7 +4604,7 @@ extern uint32_t g_reshade_technique_idx;
+ 
+ ReshadeEffectPipeline *g_pLastReshadeEffect = nullptr;
+ 
+-std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pPipewireTexture, bool partial, gamescope::Rc<CVulkanTexture> pOutputOverride, bool increment, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer )
++std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pPipewireTexture, bool partial, VulkanCompositePurpose purpose, gamescope::Rc<CVulkanTexture> pOutputOverride, bool increment, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer )
+ {
+ 	EOTF outputTF = frameInfo->outputEncodingEOTF;
+ 	if (!frameInfo->applyOutputColorMgmt)
+@@ -4193,6 +4666,128 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 	for (uint32_t i = 0; i < EOTF_Count; i++)
+ 		cmdBuffer->bindColorMgmtLuts(i, frameInfo->shaperLut[i], frameInfo->lut3D[i]);
+ 
++	gamescope::Rc<CVulkanTexture> adaptiveStateForFrame;
++	bool adaptiveAnalysisDispatched = false;
++	bool finalPipelineUsedRequestedAutoHDR = true;
++	const gamescope::autohdr::AnalysisGrid adaptiveGrid =
++		gamescope::autohdr::sceneAnalysisGrid(
++			currentOutputWidth, currentOutputHeight );
++	uint32_t adaptiveSourceLayer = 0;
++	const bool singleAdaptiveLayer =
++		frameInfo->autoHDRLayerMask != 0u &&
++		( frameInfo->autoHDRLayerMask &
++		  ( frameInfo->autoHDRLayerMask - 1u ) ) == 0u;
++	if ( singleAdaptiveLayer )
++	{
++		while ( adaptiveSourceLayer < 32u &&
++				( frameInfo->autoHDRLayerMask &
++				  ( 1u << adaptiveSourceLayer ) ) == 0u )
++			adaptiveSourceLayer++;
++	}
++
++	const bool adaptiveRequested =
++		frameInfo->autoHDRAdaptive &&
++		purpose == VulkanCompositePurpose::Presentation &&
++		!partial &&
++		!pOutputOverride &&
++		vulkan_auto_hdr_adaptive_frame_eligible( frameInfo );
++	if ( purpose == VulkanCompositePurpose::Presentation && !adaptiveRequested )
++		vulkan_auto_hdr_adaptive_invalidate();
++
++	bool adaptiveShouldReset = false;
++	uint64_t adaptiveNowNanos = 0;
++	float adaptiveElapsedSeconds = 1.0f / 60.0f;
++	if ( adaptiveRequested && ensure_auto_hdr_adaptive_state() )
++	{
++		const auto &source = frameInfo->layers[adaptiveSourceLayer];
++		const float efficientCeiling = get_hdr_itm_content_nits();
++		const float outputPeak =
++			std::clamp(
++				g_flHDRItmTargetNits,
++				efficientCeiling,
++				float( GAMESCOPE_AUTO_HDR_MAXIMUM_OUTPUT_NITS ) );
++		const bool duplicatedFrame =
++			s_autoHDRAdaptiveRuntime.stateSubmitted &&
++			frameInfo->autoHDRContentSerial != 0 &&
++			s_autoHDRAdaptiveRuntime.contentSerial ==
++				frameInfo->autoHDRContentSerial;
++		adaptiveShouldReset =
++			!s_autoHDRAdaptiveRuntime.stateSubmitted ||
++			s_autoHDRAdaptiveRuntime.sourceKey !=
++				frameInfo->autoHDRSourceKey ||
++			s_autoHDRAdaptiveRuntime.outputKey !=
++				frameInfo->autoHDROutputKey ||
++			s_autoHDRAdaptiveRuntime.calibrationSerial !=
++				frameInfo->autoHDRCalibrationSerial ||
++			s_autoHDRAdaptiveRuntime.outputGeneration !=
++				s_vulkanOutputGeneration ||
++			s_autoHDRAdaptiveRuntime.sourceColorspace != source.colorspace ||
++			s_autoHDRAdaptiveRuntime.outputEOTF !=
++				frameInfo->outputEncodingEOTF ||
++			s_autoHDRAdaptiveRuntime.efficientCeilingNits != efficientCeiling ||
++			s_autoHDRAdaptiveRuntime.outputPeakNits != outputPeak ||
++			s_autoHDRAdaptiveRuntime.outputWidth != currentOutputWidth ||
++			s_autoHDRAdaptiveRuntime.outputHeight != currentOutputHeight;
++
++		adaptiveNowNanos = get_time_in_nanos();
++		if ( !adaptiveShouldReset &&
++			s_autoHDRAdaptiveRuntime.lastPresentationNanos != 0 &&
++			adaptiveNowNanos > s_autoHDRAdaptiveRuntime.lastPresentationNanos )
++		{
++			adaptiveElapsedSeconds = float(
++				double( adaptiveNowNanos -
++					s_autoHDRAdaptiveRuntime.lastPresentationNanos ) /
++				1'000'000'000.0 );
++		}
++
++		const uint32_t previousIndex = g_output.autoHDRAdaptiveStateIndex;
++		const uint32_t nextIndex = previousIndex ^ 1u;
++		auto previousState = gamescope::Rc<CVulkanTexture>(
++			g_output.autoHDRAdaptiveState[previousIndex] );
++		auto nextState = gamescope::Rc<CVulkanTexture>(
++			g_output.autoHDRAdaptiveState[nextIndex] );
++
++		if ( cmdBuffer->bindPipeline(
++				g_device.pipeline( SHADER_TYPE_AUTO_HDR_ANALYZE ) ) )
++		{
++			cmdBuffer->bindTexture( 0, source.tex );
++			cmdBuffer->setTextureSrgb(
++				0, source.colorspace !=
++					GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR );
++			cmdBuffer->setSamplerUnnormalized( 0, false );
++			const bool nearest =
++				source.isScreenSize() ||
++				source.filter == GamescopeUpscaleFilter::NEAREST ||
++				( source.filter == GamescopeUpscaleFilter::LINEAR &&
++				  !source.viewConvertsToLinearAutomatically() );
++			cmdBuffer->setSamplerNearest( 0, nearest );
++			bind_auto_hdr_adaptive_state(
++				cmdBuffer.get(), previousState );
++			cmdBuffer->bindTarget( nextState );
++			if ( s_autoHDRAdaptiveRuntime.stateSubmitted )
++				cmdBuffer->insertAdaptiveStateBarrier(
++					previousState.get(), nextState.get() );
++			cmdBuffer->uploadConstants<AutoHDRAnalysisPushData_t>(
++				frameInfo,
++				adaptiveSourceLayer,
++				uvec2_t{ adaptiveGrid.width, adaptiveGrid.height },
++				adaptiveElapsedSeconds,
++				adaptiveShouldReset,
++				duplicatedFrame );
++			cmdBuffer->dispatch( 1, 1, 1 );
++			// Make the freshly written scalar visible to every possible final
++			// composite path in this same command buffer.
++			cmdBuffer->insertBarrier();
++			adaptiveStateForFrame = std::move( nextState );
++			adaptiveAnalysisDispatched = true;
++		}
++		else
++		{
++			vk_log.errorf(
++				"Auto HDR High Quality analysis pipeline unavailable; using Efficient" );
++		}
++	}
++
+ 	if ( frameInfo->useFSRLayer0 )
+ 	{
+ 		uint32_t inputX = frameInfo->layers[0].tex->width();
+@@ -4216,13 +4811,16 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 
+ 		cmdBuffer->dispatch(div_roundup(tempX, pixelsPerGroup), div_roundup(tempY, pixelsPerGroup));
+ 
+-		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation )) )
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		cmdBuffer->bindTexture(0, g_output.tmpOutput);
+ 		cmdBuffer->setTextureSrgb(0, true);
+ 		cmdBuffer->setSamplerUnnormalized(0, false);
+ 		cmdBuffer->setSamplerNearest(0, false);
++		if ( adaptiveAnalysisDispatched )
++			bind_auto_hdr_adaptive_state(
++				cmdBuffer.get(), adaptiveStateForFrame );
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->uploadConstants<RcasPushData_t>(frameInfo, g_upscaleFilterSharpness / 10.0f);
+ 
+@@ -4265,9 +4863,12 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		nisFrameInfo.layers[0].scale.x = 1.0f;
+ 		nisFrameInfo.layers[0].scale.y = 1.0f;
+ 
+-		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, nisFrameInfo.autoHDRLayerMask, rotation )) )
++		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, nisFrameInfo.autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), &nisFrameInfo);
++		if ( adaptiveAnalysisDispatched )
++			bind_auto_hdr_adaptive_state(
++				cmdBuffer.get(), adaptiveStateForFrame );
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->uploadConstants<BlitPushData_t>(&nisFrameInfo);
+ 
+@@ -4305,9 +4906,12 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		bool useSrgbView = frameInfo->layers[0].colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
+ 
+ 		type = frameInfo->blurLayer0 == BLUR_MODE_COND ? SHADER_TYPE_BLUR_COND : SHADER_TYPE_BLUR;
+-		if ( !cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation )) )
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
++		if ( adaptiveAnalysisDispatched )
++			bind_auto_hdr_adaptive_state(
++				cmdBuffer.get(), adaptiveStateForFrame );
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->bindTexture(VKR_BLUR_EXTRA_SLOT, g_output.tmpOutput);
+ 		cmdBuffer->setTextureSrgb(VKR_BLUR_EXTRA_SLOT, !useSrgbView); // Inverted because it chooses whether to view as linear (sRGB view) or sRGB (raw view). It's horrible. I need to change it.
+@@ -4318,9 +4922,12 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 	}
+ 	else
+ 	{
+-		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation )) )
++		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
++		if ( adaptiveAnalysisDispatched )
++			bind_auto_hdr_adaptive_state(
++				cmdBuffer.get(), adaptiveStateForFrame );
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo);
+ 
+@@ -4407,6 +5014,59 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 
+ 	uint64_t sequence = g_device.submit(std::move(cmdBuffer));
+ 
++	if ( adaptiveAnalysisDispatched && finalPipelineUsedRequestedAutoHDR )
++	{
++		s_autoHDRAdaptiveEffective = true;
++		g_output.autoHDRAdaptiveStateIndex ^= 1u;
++		const auto &source = frameInfo->layers[adaptiveSourceLayer];
++		s_autoHDRAdaptiveRuntime.sourceKey = frameInfo->autoHDRSourceKey;
++		s_autoHDRAdaptiveRuntime.contentSerial =
++			frameInfo->autoHDRContentSerial;
++		s_autoHDRAdaptiveRuntime.outputKey = frameInfo->autoHDROutputKey;
++		s_autoHDRAdaptiveRuntime.calibrationSerial =
++			frameInfo->autoHDRCalibrationSerial;
++		s_autoHDRAdaptiveRuntime.outputGeneration =
++			s_vulkanOutputGeneration;
++		s_autoHDRAdaptiveRuntime.sourceColorspace = source.colorspace;
++		s_autoHDRAdaptiveRuntime.outputEOTF =
++			frameInfo->outputEncodingEOTF;
++		s_autoHDRAdaptiveRuntime.efficientCeilingNits =
++			get_hdr_itm_content_nits();
++		s_autoHDRAdaptiveRuntime.outputPeakNits = std::clamp(
++			g_flHDRItmTargetNits,
++			s_autoHDRAdaptiveRuntime.efficientCeilingNits,
++			float( GAMESCOPE_AUTO_HDR_MAXIMUM_OUTPUT_NITS ) );
++		s_autoHDRAdaptiveRuntime.outputWidth = currentOutputWidth;
++		s_autoHDRAdaptiveRuntime.outputHeight = currentOutputHeight;
++		s_autoHDRAdaptiveRuntime.lastPresentationNanos = adaptiveNowNanos;
++		s_autoHDRAdaptiveRuntime.stateSubmitted = true;
++		if ( !s_autoHDRAdaptiveRuntime.activeLogged || adaptiveShouldReset )
++		{
++			vk_log.infof(
++				"Auto HDR High Quality active: layer=%u grid=%ux%u reset=%u",
++				adaptiveSourceLayer,
++				adaptiveGrid.width,
++				adaptiveGrid.height,
++				adaptiveShouldReset ? 1u : 0u );
++			s_autoHDRAdaptiveRuntime.activeLogged = true;
++		}
++	}
++	else if ( adaptiveAnalysisDispatched )
++	{
++		s_autoHDRAdaptiveEffective = false;
++		s_autoHDRAdaptiveRuntime.stateSubmitted = false;
++		vk_log.errorf(
++			"Auto HDR High Quality state rejected after pipeline fallback; using Efficient" );
++	}
++	else if ( purpose == VulkanCompositePurpose::Presentation )
++	{
++		s_autoHDRAdaptiveEffective = false;
++		if ( s_autoHDRAdaptiveRuntime.activeLogged )
++			vk_log.infof(
++				"Auto HDR High Quality inactive; using Efficient" );
++		s_autoHDRAdaptiveRuntime.resetTracking();
++	}
++
+ 	if ( !GetBackend()->UsesVulkanSwapchain() && pOutputOverride == nullptr && increment )
+ 	{
+ 		g_output.nOutImage = ( g_output.nOutImage + 1 ) % 3;
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+index 68f3570a..82a941bd 100644
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -43,6 +43,9 @@ class CVulkanCmdBuffer;
+ 
+ #define k_nMaxBlurLayers 2
+ 
++static_assert( VKR_AUTO_HDR_STATE_SLOT >= VKR_NIS_COEF_USM_SLOT + 1u );
++static_assert( VKR_AUTO_HDR_STATE_SLOT < VKR_SAMPLER_SLOTS );
++
+ #define kMaxBlurRadius (37u / 2 + 1)
+ 
+ enum BlurMode {
+@@ -301,6 +304,11 @@ struct FrameInfo_t
+ 
+ 	int layerCount;
+ 	uint32_t autoHDRLayerMask = 0;
++	bool autoHDRAdaptive = false;
++	uint64_t autoHDRSourceKey = 0;
++	uint64_t autoHDRContentSerial = 0;
++	uint64_t autoHDROutputKey = 0;
++	uint64_t autoHDRCalibrationSerial = 0;
+ 	struct Layer_t
+ 	{
+ 		gamescope::Rc<CVulkanTexture> tex;
+@@ -407,6 +415,9 @@ namespace CompositeDebugFlag
+ 	static constexpr uint32_t Heatmap_MSWCG = 1u << 3;
+ 	static constexpr uint32_t Heatmap_Hard = 1u << 4;
+ 	static constexpr uint32_t Markers_Partial = 1u << 5;
++	// Visualizes analyzed SDR luminance in the final Auto HDR composite.
++	// It does not visualize temporal controller state.
++	static constexpr uint32_t AutoHDRLuminanceHeatmap = 1u << 6;
+ 	static constexpr uint32_t Tonemap_Reinhard = 1u << 7;
+ };
+ 
+@@ -419,7 +430,13 @@ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_dmabuf( struct wl
+ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_bits( uint32_t width, uint32_t height, uint32_t contentWidth, uint32_t contentHeight, uint32_t drmFormat, CVulkanTexture::createFlags texCreateFlags, void *bits );
+ gamescope::OwningRc<CVulkanTexture> vulkan_create_texture_from_wlr_buffer( struct wlr_buffer *buf, gamescope::OwningRc<gamescope::IBackendFb> pBackendFb );
+ 
+-std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pScreenshotTexture, bool partial, gamescope::Rc<CVulkanTexture> pOutputOverride = nullptr, bool increment = true, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer = nullptr );
++enum class VulkanCompositePurpose : uint8_t
++{
++	Presentation,
++	Auxiliary,
++};
++
++std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamescope::Rc<CVulkanTexture> pScreenshotTexture, bool partial, VulkanCompositePurpose purpose, gamescope::Rc<CVulkanTexture> pOutputOverride = nullptr, bool increment = true, std::unique_ptr<CVulkanCmdBuffer> pInCommandBuffer = nullptr );
+ void vulkan_wait( uint64_t ulSeqNo, bool bReset );
+ gamescope::Rc<CVulkanTexture> vulkan_get_last_output_image( bool partial, bool defer );
+ gamescope::Rc<CVulkanTexture> vulkan_acquire_screenshot_texture(uint32_t width, uint32_t height, bool exportable, uint32_t drmFormat, EStreamColorspace colorspace = k_EStreamColorspace_Unknown);
+@@ -558,6 +575,10 @@ struct VulkanOutput_t
+ 	// NIS
+ 	gamescope::OwningRc<CVulkanTexture> nisScalerImage;
+ 	gamescope::OwningRc<CVulkanTexture> nisUsmImage;
++
++	// Auto HDR High Quality temporal state. Each image is 2x1 RGBA32F.
++	std::array<gamescope::OwningRc<CVulkanTexture>, 2> autoHDRAdaptiveState;
++	uint32_t autoHDRAdaptiveStateIndex = 0;
+ };
+ 
+ 
+@@ -570,6 +591,7 @@ enum ShaderType {
+ 	SHADER_TYPE_RCAS,
+ 	SHADER_TYPE_NIS,
+ 	SHADER_TYPE_RGB_TO_NV12,
++	SHADER_TYPE_AUTO_HDR_ANALYZE,
+ 
+ 	SHADER_TYPE_COUNT
+ };
+@@ -619,6 +641,7 @@ struct PipelineInfo_t
+ 	uint32_t colorspaceMask;
+ 	uint32_t outputEOTF;
+ 	uint32_t autoHDRLayerMask;
++	uint32_t autoHDRAdaptive;
+ 
+ 	uint32_t rotation;
+ 
+@@ -632,6 +655,7 @@ struct PipelineInfo_t
+ 		colorspaceMask == o.colorspaceMask &&
+ 		outputEOTF == o.outputEOTF &&
+ 		autoHDRLayerMask == o.autoHDRLayerMask &&
++		autoHDRAdaptive == o.autoHDRAdaptive &&
+ 		rotation == o.rotation;
+ 	}
+ };
+@@ -656,6 +680,7 @@ namespace std
+ 			hash = hash_combine(hash, k.colorspaceMask);
+ 			hash = hash_combine(hash, k.outputEOTF);
+ 			hash = hash_combine(hash, k.autoHDRLayerMask);
++			hash = hash_combine(hash, k.autoHDRAdaptive);
+ 			hash = hash_combine(hash, k.rotation);
+ 			return hash;
+ 		}
+@@ -785,7 +810,7 @@ public:
+ 	bool BInit(VkInstance instance, VkSurfaceKHR surface);
+ 
+ 	VkSampler sampler(SamplerState key);
+-	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, uint32_t auto_hdr_layer_mask = 0, uint32_t rotation = 0);
++	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, uint32_t auto_hdr_layer_mask = 0, uint32_t rotation = 0, bool auto_hdr_adaptive = false, bool *used_requested_auto_hdr = nullptr);
+ 	int32_t findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits );
+ 	std::unique_ptr<CVulkanCmdBuffer> commandBuffer();
+ 	uint64_t submit( std::unique_ptr<CVulkanCmdBuffer> cmdBuf);
+@@ -821,6 +846,11 @@ public:
+ 	inline bool hasDrmPrimaryDevId() {return m_bHasDrmPrimaryDevId;}
+ 	inline dev_t primaryDevId() {return m_drmPrimaryDevId;}
+ 	inline bool supportsFp16() {return m_bSupportsFp16;}
++	bool supportsFormatFeatures( VkFormat format, VkFormatFeatureFlags features );
++	inline bool supportsAutoHDRAdaptiveShader() const
++	{
++		return m_bAutoHDRAdaptiveShaderAvailable;
++	}
+ 	inline std::vector<VkExtensionProperties>& supportedExtensions() {return m_supportedExts;}
+ 
+ 	inline std::pair<void *, uint32_t> uploadBufferData(uint32_t size)
+@@ -860,7 +890,7 @@ protected:
+ 	bool createPools();
+ 	bool createShaders();
+ 	bool createScratchResources();
+-	VkPipeline compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation);
++	VkPipeline compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation, bool auto_hdr_adaptive);
+ 	void compileAllPipelines();
+ 
+ 	VkDevice m_device = nullptr;
+@@ -883,6 +913,7 @@ protected:
+ 	dev_t m_drmPrimaryDevId = 0;
+ 
+ 	bool m_bSupportsFp16 = false;
++	bool m_bAutoHDRAdaptiveShaderAvailable = false;
+ 	bool m_bHasDrmPrimaryDevId = false;
+ 	bool m_bSupportsModifiers = false;
+ 	bool m_bInitialized = false;
+@@ -901,7 +932,7 @@ protected:
+ 	// currently just one set, no need to double buffer because we
+ 	// vkQueueWaitIdle after each submit.
+ 	// should be moved to the output if we are going to support multiple outputs
+-	std::array<VkDescriptorSet, k_uMaxConcurrentSubmits * 3> m_descriptorSets;
++	std::array<VkDescriptorSet, k_uMaxConcurrentSubmits * 4> m_descriptorSets;
+ 	uint32_t m_currentDescriptorSet = 0;
+ 
+ 	VkBuffer m_uploadBuffer;
+@@ -971,6 +1002,8 @@ public:
+ 	void discardImage(CVulkanTexture *image);
+ 	void markDirty(CVulkanTexture *image);
+ 	void insertBarrier(bool flush = false);
++	void insertAdaptiveStateBarrier(
++		CVulkanTexture *previousState, CVulkanTexture *nextState);
+ 
+ 	VkQueue queue() { return m_queue; }
+ 	uint32_t queueFamily() { return m_queueFamily; }
+@@ -1015,6 +1048,12 @@ uint32_t DRMFormatGetBPP( uint32_t nDRMFormat );
+ gamescope::OwningRc<CVulkanTexture> vulkan_create_flat_texture( uint32_t width, uint32_t height, uint8_t r, uint8_t g, uint8_t b, uint8_t a );
+ 
+ bool vulkan_supports_hdr10();
++bool vulkan_auto_hdr_adaptive_supported();
++bool vulkan_auto_hdr_adaptive_effective();
++bool vulkan_auto_hdr_adaptive_frame_eligible( const FrameInfo_t *frameInfo );
++// Presentation-thread state invalidation. This deliberately preserves the
++// allocated images and cached capability result.
++void vulkan_auto_hdr_adaptive_invalidate();
+ 
+ void vulkan_wait_idle();
+ 
+diff --git a/src/shaders/auto_hdr_adaptive_constants.h b/src/shaders/auto_hdr_adaptive_constants.h
+new file mode 100644
+index 00000000..5c678bee
+--- /dev/null
++++ b/src/shaders/auto_hdr_adaptive_constants.h
+@@ -0,0 +1,47 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#ifndef GAMESCOPE_AUTO_HDR_ADAPTIVE_CONSTANTS_H
++#define GAMESCOPE_AUTO_HDR_ADAPTIVE_CONSTANTS_H
++
++// Clean-room Auto HDR analysis and controller policy. This header contains
++// preprocessor constants only so the CPU reference and GLSL implementation use
++// exactly the same independently selected values.
++#define GAMESCOPE_AUTO_HDR_ANALYSIS_LONG_AXIS 96
++#define GAMESCOPE_AUTO_HDR_ANALYSIS_MINIMUM_SHORT_AXIS 32
++
++#define GAMESCOPE_AUTO_HDR_DEFAULT_EFFICIENT_NITS 203.0
++#define GAMESCOPE_AUTO_HDR_MAXIMUM_OUTPUT_NITS 10000.0
++#define GAMESCOPE_AUTO_HDR_MINIMUM_VALID_COVERAGE 0.80
++
++#define GAMESCOPE_AUTO_HDR_UPPER_BAND_START 0.70
++#define GAMESCOPE_AUTO_HDR_UPPER_BAND_FULL 0.90
++#define GAMESCOPE_AUTO_HDR_BROAD_SAMPLE_START 0.55
++#define GAMESCOPE_AUTO_HDR_BROAD_SAMPLE_FULL 0.85
++#define GAMESCOPE_AUTO_HDR_PEAK_CONFIDENCE_START 0.0005
++#define GAMESCOPE_AUTO_HDR_PEAK_CONFIDENCE_FULL 0.0040
++#define GAMESCOPE_AUTO_HDR_POWER_MEAN_EXPONENT 0.125
++
++#define GAMESCOPE_AUTO_HDR_PEAK_START 0.72
++#define GAMESCOPE_AUTO_HDR_PEAK_FULL 0.98
++#define GAMESCOPE_AUTO_HDR_OCCUPANCY_START 0.002
++#define GAMESCOPE_AUTO_HDR_OCCUPANCY_FULL 0.030
++#define GAMESCOPE_AUTO_HDR_HIGHLIGHT_PEAK_WEIGHT 0.70
++#define GAMESCOPE_AUTO_HDR_HIGHLIGHT_OCCUPANCY_WEIGHT 0.30
++#define GAMESCOPE_AUTO_HDR_BROAD_FIELD_START 0.15
++#define GAMESCOPE_AUTO_HDR_BROAD_FIELD_FULL 0.65
++#define GAMESCOPE_AUTO_HDR_MEAN_PROTECTION_START 0.30
++#define GAMESCOPE_AUTO_HDR_MEAN_PROTECTION_FULL 0.72
++#define GAMESCOPE_AUTO_HDR_MAXIMUM_BROAD_FIELD_PROTECTION 0.85
++
++#define GAMESCOPE_AUTO_HDR_DEADBAND_NITS 4.0
++#define GAMESCOPE_AUTO_HDR_DIRECTION_HYSTERESIS_NITS 3.0
++#define GAMESCOPE_AUTO_HDR_REDUCTION_DWELL_SECONDS 0.08
++#define GAMESCOPE_AUTO_HDR_RESTORATION_DWELL_SECONDS 0.24
++#define GAMESCOPE_AUTO_HDR_REDUCTION_TIME_CONSTANT_SECONDS 0.10
++#define GAMESCOPE_AUTO_HDR_RESTORATION_TIME_CONSTANT_SECONDS 0.55
++#define GAMESCOPE_AUTO_HDR_SCENE_CUT_MEAN_DELTA 0.20
++#define GAMESCOPE_AUTO_HDR_SCENE_CUT_PEAK_DELTA 0.28
++#define GAMESCOPE_AUTO_HDR_SCENE_CUT_LOWER_FRACTION 0.5
++#define GAMESCOPE_AUTO_HDR_MAXIMUM_ELAPSED_SECONDS 0.25
++
++#endif
+diff --git a/src/shaders/composite.h b/src/shaders/composite.h
+index afbaf8fc..1f199b2c 100644
+--- a/src/shaders/composite.h
++++ b/src/shaders/composite.h
+@@ -84,8 +84,31 @@ vec3 apply_layer_color_mgmt(vec3 color, uint layer, uint colorspace) {
+     if (auto_hdr_enabled && auto_hdr_eligible)
+     {
+         color = (vec4(bounded_color(color, 1.0f), 1.0f) * u_autoHDRSourceTo2020).rgb;
++        float content_nits = u_itmContentNits;
++        if (c_auto_hdr_adaptive != 0u)
++        {
++            float adaptive_nits =
++                texelFetch(s_samplers[VKR_AUTO_HDR_STATE_SLOT], ivec2(0, 0), 0).r;
++            if (!isnan(adaptive_nits) && !isinf(adaptive_nits) &&
++                adaptive_nits >= u_itmSdrNits && adaptive_nits <= u_itmTargetNits)
++                content_nits = adaptive_nits;
++        }
++
++        if (c_auto_hdr_adaptive != 0u &&
++            checkDebugFlag(compositedebug_AutoHDRLuminanceHeatmap))
++        {
++            const vec3 k_bt2020 =
++                vec3(0.262698338956556, 0.678008765772817, 0.0592928952706273);
++            float y = clamp(dot(bounded_color(color, 1.0f), k_bt2020), 0.0f, 1.0f);
++            vec3 debug_color =
++                y < 0.55f ? vec3(0.02f, 0.08f, 0.25f) :
++                y < 0.72f ? vec3(0.02f, 0.55f, 0.20f) :
++                y < 0.90f ? vec3(0.95f, 0.65f, 0.02f) :
++                            vec3(1.00f, 0.05f, 0.02f);
++            color = mix(color, debug_color, 0.70f);
++        }
+         color = nitsToScRGB(efficient_inverse_tonemapping(
+-            color, u_itmSdrNits, u_itmTargetNits, u_itmContentNits));
++            color, u_itmSdrNits, u_itmTargetNits, content_nits));
+         // Values use scRGB luminance units, but the mapped primaries are BT.2020.
+         colorspace = colorspace_pq;
+     }
+diff --git a/src/shaders/cs_auto_hdr_analyze.comp b/src/shaders/cs_auto_hdr_analyze.comp
+new file mode 100644
+index 00000000..05b91ab6
+--- /dev/null
++++ b/src/shaders/cs_auto_hdr_analyze.comp
+@@ -0,0 +1,366 @@
++#version 450
++
++#extension GL_GOOGLE_include_directive : require
++#extension GL_EXT_scalar_block_layout : require
++
++#include "descriptor_set_constants.h"
++#include "auto_hdr_adaptive_constants.h"
++
++layout(local_size_x = 16, local_size_y = 8, local_size_z = 1) in;
++
++layout(binding = 0, scalar) uniform adaptive_data_t {
++    mat3x4 u_sourceCTM;
++    mat3x4 u_sourceTo2020;
++    vec2 u_scale;
++    vec2 u_offset;
++    uvec2 u_sourceExtent;
++    uvec2 u_displayExtent;
++    uvec2 u_gridExtent;
++    uint u_sourceColorspace;
++    uint u_sourceAlphaMode;
++    uint u_reset;
++    uint u_transitional;
++    uint u_duplicated;
++    float u_opacity;
++    float u_elapsedSeconds;
++    float u_efficientCeilingNits;
++    float u_outputPeakNits;
++};
++
++layout(binding = 1, rgba32f) writeonly uniform image2D u_nextState;
++layout(binding = 3) uniform sampler2D s_samplers[VKR_SAMPLER_SLOTS];
++
++const uint colorspace_linear = 0u;
++const uint colorspace_sRGB = 1u;
++const vec3 k_bt2020 =
++    vec3(0.262698338956556, 0.678008765772817, 0.0592928952706273);
++
++shared vec4 s_accum[128];
++shared vec4 s_extra[128];
++
++vec3 finite_nonnegative(vec3 color)
++{
++    return vec3(
++        isnan(color.r) || isinf(color.r) ? 0.0f : max(color.r, 0.0f),
++        isnan(color.g) || isinf(color.g) ? 0.0f : max(color.g, 0.0f),
++        isnan(color.b) || isinf(color.b) ? 0.0f : max(color.b, 0.0f));
++}
++
++vec3 decode_source(vec3 color)
++{
++    if (u_sourceColorspace == colorspace_sRGB)
++    {
++        bvec3 low = lessThanEqual(color, vec3(0.04045f));
++        color = mix(
++            pow((color + 0.055f) / 1.055f, vec3(2.4f)),
++            color / 12.92f,
++            low);
++    }
++    return color;
++}
++
++float smooth_unit(float lower, float upper, float value)
++{
++    float t = clamp((value - lower) / (upper - lower), 0.0f, 1.0f);
++    return t * t * (3.0f - 2.0f * t);
++}
++
++float desired_ceiling(
++    float mean, float upper_occupancy, float approximate_peak, float broad_load)
++{
++    float peak_signal = smooth_unit(
++        GAMESCOPE_AUTO_HDR_PEAK_START,
++        GAMESCOPE_AUTO_HDR_PEAK_FULL,
++        approximate_peak);
++    float occupancy_signal = smooth_unit(
++        GAMESCOPE_AUTO_HDR_OCCUPANCY_START,
++        GAMESCOPE_AUTO_HDR_OCCUPANCY_FULL,
++        upper_occupancy);
++    float highlight_demand = peak_signal *
++        (GAMESCOPE_AUTO_HDR_HIGHLIGHT_PEAK_WEIGHT +
++         GAMESCOPE_AUTO_HDR_HIGHLIGHT_OCCUPANCY_WEIGHT * occupancy_signal);
++    float broad_signal = smooth_unit(
++        GAMESCOPE_AUTO_HDR_BROAD_FIELD_START,
++        GAMESCOPE_AUTO_HDR_BROAD_FIELD_FULL,
++        broad_load);
++    float mean_signal = smooth_unit(
++        GAMESCOPE_AUTO_HDR_MEAN_PROTECTION_START,
++        GAMESCOPE_AUTO_HDR_MEAN_PROTECTION_FULL,
++        mean);
++    float protection = GAMESCOPE_AUTO_HDR_MAXIMUM_BROAD_FIELD_PROTECTION *
++        max(broad_signal, mean_signal);
++    float usable = highlight_demand * (1.0f - protection);
++    return clamp(
++        u_efficientCeilingNits +
++            (u_outputPeakNits - u_efficientCeilingNits) * usable,
++        u_efficientCeilingNits,
++        u_outputPeakNits);
++}
++
++void main()
++{
++    uint lane = gl_LocalInvocationIndex;
++    uint sample_count = u_gridExtent.x * u_gridExtent.y;
++    vec4 accum = vec4(0.0f);
++    vec4 extra = vec4(0.0f);
++
++    for (uint index = lane; index < sample_count; index += 128u)
++    {
++        uvec2 grid = uvec2(index % u_gridExtent.x, index / u_gridExtent.x);
++        vec2 display_coord =
++            ((vec2(grid) + vec2(0.5f)) / vec2(u_gridExtent)) *
++            vec2(u_displayExtent);
++        vec2 source_coord = (display_coord + u_offset) * u_scale;
++        bool inside = all(greaterThanEqual(source_coord, vec2(0.0f))) &&
++            all(lessThan(source_coord, vec2(u_sourceExtent)));
++        if (!inside)
++            continue;
++        vec2 uv = source_coord / vec2(u_sourceExtent);
++        vec4 sample_value = textureLod(s_samplers[0], uv, 0.0f);
++        float source_alpha =
++            u_sourceAlphaMode == 2u ? 1.0f : sample_value.a;
++        float coverage = clamp(source_alpha * u_opacity, 0.0f, 1.0f);
++        bool finite_sample =
++            !any(isnan(sample_value)) && !any(isinf(sample_value));
++        if (!finite_sample)
++        {
++            extra.z += 1.0f;
++            continue;
++        }
++        if (coverage <= 0.0f)
++            continue;
++
++        vec3 linear = decode_source(sample_value.rgb);
++        linear = (vec4(linear, 1.0f) * u_sourceCTM).rgb;
++        if (any(isnan(linear)) || any(isinf(linear)))
++        {
++            extra.z += 1.0f;
++            continue;
++        }
++        linear = (vec4(clamp(finite_nonnegative(linear), 0.0f, 1.0f), 1.0f) *
++            u_sourceTo2020).rgb;
++        if (any(isnan(linear)) || any(isinf(linear)))
++        {
++            extra.z += 1.0f;
++            continue;
++        }
++        // The production ITM clamps the post-sourceTo2020 channels before
++        // measuring luminance, so analysis uses the same domain.
++        linear = clamp(linear, 0.0f, 1.0f);
++        float y = clamp(dot(linear, k_bt2020), 0.0f, 1.0f);
++        if (isnan(y) || isinf(y))
++            continue;
++
++        float y2 = y * y;
++        float y4 = y2 * y2;
++        float y8 = y4 * y4;
++        accum.x += coverage * y;
++        accum.y += coverage * smooth_unit(
++            GAMESCOPE_AUTO_HDR_UPPER_BAND_START,
++            GAMESCOPE_AUTO_HDR_UPPER_BAND_FULL,
++            y);
++        accum.z = max(accum.z, y);
++        accum.w += coverage * smooth_unit(
++            GAMESCOPE_AUTO_HDR_BROAD_SAMPLE_START,
++            GAMESCOPE_AUTO_HDR_BROAD_SAMPLE_FULL,
++            y);
++        extra.x += coverage;
++        extra.y += coverage * y8;
++    }
++
++    s_accum[lane] = accum;
++    s_extra[lane] = extra;
++    barrier();
++
++    for (uint stride = 64u; stride > 0u; stride >>= 1u)
++    {
++        if (lane < stride)
++        {
++            s_accum[lane].xyw += s_accum[lane + stride].xyw;
++            s_accum[lane].z = max(s_accum[lane].z, s_accum[lane + stride].z);
++            s_extra[lane] += s_extra[lane + stride];
++        }
++        barrier();
++    }
++
++    if (lane != 0u)
++        return;
++
++    float valid_count = s_extra[0].x;
++    float valid_coverage = sample_count > 0u
++        ? valid_count / float(sample_count)
++        : 0.0f;
++    float denominator = max(valid_count, 1.0f);
++    float mean = clamp(s_accum[0].x / denominator, 0.0f, 1.0f);
++    float upper_occupancy = clamp(s_accum[0].y / denominator, 0.0f, 1.0f);
++    float power_mean = valid_count > 0.0f
++        ? pow(
++            max(s_extra[0].y / valid_count, 0.0f),
++            GAMESCOPE_AUTO_HDR_POWER_MEAN_EXPONENT)
++        : 0.0f;
++    float peak_confidence =
++        smooth_unit(
++            GAMESCOPE_AUTO_HDR_PEAK_CONFIDENCE_START,
++            GAMESCOPE_AUTO_HDR_PEAK_CONFIDENCE_FULL,
++            upper_occupancy);
++    float peak = clamp(
++        power_mean + peak_confidence * (s_accum[0].z - power_mean),
++        0.0f,
++        1.0f);
++    float broad_load = clamp(s_accum[0].w / denominator, 0.0f, 1.0f);
++    float desired = desired_ceiling(mean, upper_occupancy, peak, broad_load);
++
++    vec4 previous0 = texelFetch(
++        s_samplers[VKR_AUTO_HDR_STATE_SLOT], ivec2(0, 0), 0);
++    vec4 previous1 = texelFetch(
++        s_samplers[VKR_AUTO_HDR_STATE_SLOT], ivec2(1, 0), 0);
++    bool finite_state =
++        !any(isnan(previous0)) && !any(isinf(previous0)) &&
++        !any(isnan(previous1)) && !any(isinf(previous1));
++    bool valid_direction =
++        previous1.x == -1.0f ||
++        previous1.x == 0.0f ||
++        previous1.x == 1.0f;
++    bool valid_init = previous1.y == 0.0f || previous1.y == 1.0f;
++    bool valid_state = finite_state &&
++        previous0.x >= u_efficientCeilingNits &&
++        previous0.x <= u_outputPeakNits &&
++        previous0.y >= 0.0f && previous0.y <= 1.0f &&
++        previous0.z >= 0.0f && previous0.z <= 1.0f &&
++        previous0.w >= 0.0f &&
++        valid_direction &&
++        valid_init &&
++        previous1.z >= u_efficientCeilingNits &&
++        previous1.z <= u_outputPeakNits &&
++        previous1.w >= 0.0f && previous1.w <= 1.0f;
++    bool initialized = valid_state && previous1.y == 1.0f;
++
++    float content = initialized ? previous0.x : u_efficientCeilingNits;
++    float pending_seconds = initialized ? previous0.w : 0.0f;
++    float pending_direction = initialized ? previous1.x : 0.0f;
++    bool raw_invalid = s_extra[0].z > 0.0f;
++    if (raw_invalid)
++        desired = content;
++    else if (valid_coverage < GAMESCOPE_AUTO_HDR_MINIMUM_VALID_COVERAGE)
++        desired = u_efficientCeilingNits;
++    bool excessive_elapsed =
++        !isnan(u_elapsedSeconds) && !isinf(u_elapsedSeconds) &&
++        u_elapsedSeconds > GAMESCOPE_AUTO_HDR_MAXIMUM_ELAPSED_SECONDS;
++    bool freeze = u_reset != 0u || u_transitional != 0u ||
++        u_duplicated != 0u ||
++        raw_invalid ||
++        valid_coverage < GAMESCOPE_AUTO_HDR_MINIMUM_VALID_COVERAGE ||
++        isnan(u_elapsedSeconds) || isinf(u_elapsedSeconds) ||
++        u_elapsedSeconds <= 0.0f ||
++        u_elapsedSeconds > GAMESCOPE_AUTO_HDR_MAXIMUM_ELAPSED_SECONDS;
++    if (u_transitional != 0u ||
++        valid_coverage < GAMESCOPE_AUTO_HDR_MINIMUM_VALID_COVERAGE ||
++        raw_invalid || excessive_elapsed)
++    {
++        pending_seconds = 0.0f;
++        pending_direction = 0.0f;
++    }
++
++    float mean_cut_signal = initialized
++        ? smooth_unit(
++            GAMESCOPE_AUTO_HDR_SCENE_CUT_LOWER_FRACTION *
++                GAMESCOPE_AUTO_HDR_SCENE_CUT_MEAN_DELTA,
++            GAMESCOPE_AUTO_HDR_SCENE_CUT_MEAN_DELTA,
++            abs(mean - previous0.y))
++        : 0.0f;
++    float peak_cut_signal = initialized
++        ? smooth_unit(
++            GAMESCOPE_AUTO_HDR_SCENE_CUT_LOWER_FRACTION *
++                GAMESCOPE_AUTO_HDR_SCENE_CUT_PEAK_DELTA,
++            GAMESCOPE_AUTO_HDR_SCENE_CUT_PEAK_DELTA,
++            abs(peak - previous0.z))
++        : 0.0f;
++    float scene_cut_signal = max(mean_cut_signal, peak_cut_signal);
++    if (excessive_elapsed)
++    {
++        content = u_efficientCeilingNits;
++        desired = u_efficientCeilingNits;
++    }
++    bool cut_reduced = false;
++    if (!freeze && scene_cut_signal > 0.0f)
++    {
++        pending_seconds = 0.0f;
++        pending_direction = 0.0f;
++        if (desired < content)
++        {
++            content = clamp(
++                content + scene_cut_signal * (desired - content),
++                u_efficientCeilingNits,
++                u_outputPeakNits);
++            cut_reduced = true;
++        }
++    }
++    if (!freeze && !cut_reduced)
++    {
++        float difference = desired - content;
++        if (abs(difference) <= GAMESCOPE_AUTO_HDR_DEADBAND_NITS)
++        {
++            pending_seconds = 0.0f;
++            pending_direction = 0.0f;
++        }
++        else
++        {
++            float direction = difference < 0.0f ? -1.0f : 1.0f;
++            bool hysteresis_freeze =
++                pending_direction != 0.0f &&
++                direction != pending_direction &&
++                abs(difference) <=
++                    GAMESCOPE_AUTO_HDR_DEADBAND_NITS +
++                    GAMESCOPE_AUTO_HDR_DIRECTION_HYSTERESIS_NITS;
++            if (!hysteresis_freeze && direction != pending_direction)
++            {
++                pending_direction = direction;
++                pending_seconds = u_elapsedSeconds;
++            }
++            else if (!hysteresis_freeze)
++            {
++                pending_seconds += u_elapsedSeconds;
++            }
++
++            float dwell = direction < 0.0f
++                ? GAMESCOPE_AUTO_HDR_REDUCTION_DWELL_SECONDS
++                : GAMESCOPE_AUTO_HDR_RESTORATION_DWELL_SECONDS;
++            if (!hysteresis_freeze &&
++                direction == pending_direction && pending_seconds >= dwell)
++            {
++                float time_constant =
++                    direction < 0.0f
++                        ? GAMESCOPE_AUTO_HDR_REDUCTION_TIME_CONSTANT_SECONDS
++                        : GAMESCOPE_AUTO_HDR_RESTORATION_TIME_CONSTANT_SECONDS;
++                float blend = 1.0f - exp(-u_elapsedSeconds / time_constant);
++                content = clamp(
++                    content + blend * (desired - content),
++                    u_efficientCeilingNits,
++                    u_outputPeakNits);
++            }
++        }
++    }
++    else if (u_reset != 0u)
++    {
++        content = u_efficientCeilingNits;
++        pending_seconds = 0.0f;
++        pending_direction = 0.0f;
++    }
++
++    bool preserve_history =
++        freeze && initialized && u_reset == 0u && !excessive_elapsed;
++    float stored_mean = preserve_history ? previous0.y : mean;
++    float stored_peak = preserve_history ? previous0.z : peak;
++    imageStore(u_nextState, ivec2(0, 0),
++        vec4(content, stored_mean, stored_peak, pending_seconds));
++    imageStore(u_nextState, ivec2(1, 0),
++        vec4(
++            pending_direction,
++            excessive_elapsed
++                ? 0.0f
++                : (freeze && initialized && u_reset == 0u
++                    ? previous1.y
++                    : 1.0f),
++            desired,
++            valid_coverage));
++}
+diff --git a/src/shaders/descriptor_set.h b/src/shaders/descriptor_set.h
+index bb5d63b9..94f92584 100644
+--- a/src/shaders/descriptor_set.h
++++ b/src/shaders/descriptor_set.h
+@@ -10,6 +10,7 @@ layout(constant_id = 5) const uint c_output_eotf = 0;
+ layout(constant_id = 6) const uint c_auto_hdr_layer_mask = 0;
+ 
+ layout(constant_id = 7) const uint c_rotation = 0; // 1: right, 2: left, 3: upsidedown
++layout(constant_id = 8) const uint c_auto_hdr_adaptive = 0;
+ 
+ const int colorspace_linear = 0;
+ const int colorspace_sRGB = 1;
+@@ -36,6 +37,8 @@ const uint compositedebug_Heatmap = 1u << 2;
+ const uint compositedebug_Heatmap_MSWCG = 1u << 3; // If compositedebug_Heatmap is set, use the MS WCG heatmap instead of Lilium
+ const uint compositedebug_Heatmap_Hard = 1u << 4; // If compositedebug_Heatmap is set, use a heatmap with specialized hard flagging
+ const uint compositedebug_Markers_Partial = 1u << 5; // If compositedebug_Heatmap is set, use a heatmap with specialized hard flagging
++// Auto HDR scene-luminance heatmap, not temporal controller state.
++const uint compositedebug_AutoHDRLuminanceHeatmap = 1u << 6;
+ //const uint compositedebug_Tonemap_Reinhard = 1u << 7; // Use Reinhard tonemapping instead of Uncharted.
+ 
+ bool checkDebugFlag(uint flag) {
+diff --git a/src/shaders/descriptor_set_constants.h b/src/shaders/descriptor_set_constants.h
+index 4a68aa33..688607c1 100644
+--- a/src/shaders/descriptor_set_constants.h
++++ b/src/shaders/descriptor_set_constants.h
+@@ -8,6 +8,7 @@
+ #define VKR_BLUR_EXTRA_SLOT       VKR_MAX_LAYERS
+ #define VKR_NIS_COEF_SCALER_SLOT (VKR_BLUR_EXTRA_SLOT + 1u)
+ #define VKR_NIS_COEF_USM_SLOT    (VKR_NIS_COEF_SCALER_SLOT + 1u)
++#define VKR_AUTO_HDR_STATE_SLOT  15u
+ 
+ #define VKR_LUT3D_COUNT 2 // Must match EOTF_Count
+ 
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index f143adf7..6bd441a3 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -492,8 +492,13 @@ bool g_bSupportsHDR_CachedValue = false;
+ bool g_bForceHDR10OutputDebug = false;
+ gamescope::ConVar<bool> cv_hdr_enabled{ "hdr_enabled", false, "Whether or not HDR is enabled if it is available." };
+ bool g_bHDRItmEnable = false;
++gamescope::autohdr::Mode g_eAutoHDRMode =
++	gamescope::autohdr::Mode::Efficient;
+ bool g_bAutoHDRActive = false;
+ bool g_bAutoHDRActiveCached = false;
++gamescope::autohdr::Mode g_eAutoHDREffectiveModeCached =
++	gamescope::autohdr::Mode::Off;
++uint32_t g_uAutoHDRSupportedModesCached = UINT32_MAX;
+ int g_nCurrentRefreshRate_CachedValue = 0;
+ 
+ static void
+@@ -2492,7 +2497,7 @@ static void paint_pipewire()
+ 
+ 	std::optional<uint64_t> oPipewireSequence = vulkan_screenshot( &frameInfo, pRGBTexture, pYUVTexture );
+ 	// If we ever want the fat compositing path, use this.
+-	//std::optional<uint64_t> oPipewireSequence = vulkan_composite( &frameInfo, s_pPipewireBuffer->texture, false, pRGBTexture, false );
++	//std::optional<uint64_t> oPipewireSequence = vulkan_composite( &frameInfo, s_pPipewireBuffer->texture, false, VulkanCompositePurpose::Auxiliary, pRGBTexture, false );
+ 
+ 	g_uCompositeDebug = uCompositeDebugBackup;
+ 
+@@ -2611,7 +2616,17 @@ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendC
+ 
+ 	const gamescope::autohdr::PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
+ 	frameInfo->autoHDRLayerMask = result.layerMask;
++	frameInfo->autoHDRAdaptive =
++		g_eAutoHDRMode == gamescope::autohdr::Mode::HighQuality &&
++		result.layerMask != 0u &&
++		vulkan_auto_hdr_adaptive_frame_eligible( frameInfo );
++	if ( !frameInfo->autoHDRAdaptive )
++		vulkan_auto_hdr_adaptive_invalidate();
+ 	frameInfo->autoHDRSourceTo2020 = s_autoHDRSourceTo2020Matrix;
++	frameInfo->autoHDRSourceKey = baseWindow ? baseWindow->id() : 0;
++	frameInfo->autoHDRContentSerial = g_uCurrentBasePlaneCommitID;
++	frameInfo->autoHDROutputKey = connector ? connector->GetConnectorID() : 0;
++	frameInfo->autoHDRCalibrationSerial = g_ColorMgmt.serial;
+ 	g_bAutoHDRActive = gamescope::autohdr::activeFromLayerMask( result.layerMask );
+ 
+ 	static bool logged = false;
+@@ -3086,10 +3101,10 @@ paint_all( global_focus_t *pFocus, bool async )
+ 
+ 			std::optional<uint64_t> oScreenshotSeq;
+ 			if ( drmCaptureFormat == DRM_FORMAT_NV12 )
+-				oScreenshotSeq = vulkan_composite( &frameInfo, pScreenshotTexture, false, nullptr );
++				oScreenshotSeq = vulkan_composite( &frameInfo, pScreenshotTexture, false, VulkanCompositePurpose::Auxiliary, nullptr );
+ 			else if ( oScreenshotInfo->eScreenshotType == GAMESCOPE_CONTROL_SCREENSHOT_TYPE_FULL_COMPOSITION ||
+ 					  oScreenshotInfo->eScreenshotType == GAMESCOPE_CONTROL_SCREENSHOT_TYPE_SCREEN_BUFFER )
+-				oScreenshotSeq = vulkan_composite( &frameInfo, nullptr, false, pScreenshotTexture );
++				oScreenshotSeq = vulkan_composite( &frameInfo, nullptr, false, VulkanCompositePurpose::Auxiliary, pScreenshotTexture );
+ 			else
+ 				oScreenshotSeq = vulkan_screenshot( &frameInfo, pScreenshotTexture, nullptr );
+ 
+@@ -6602,6 +6617,13 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+ 		g_bHDRItmEnable = !!get_prop( ctx, ctx->root, ctx->atoms.gamescopeHDRItmEnable, 0 );
+ 		hasRepaint = true;
+ 	}
++	if ( ev->atom == ctx->atoms.gamescopeHDRItmMode )
++	{
++		g_eAutoHDRMode = gamescope::autohdr::sanitizeRequestedMode(
++			get_prop( ctx, ctx->root, ctx->atoms.gamescopeHDRItmMode,
++				uint32_t( gamescope::autohdr::Mode::Efficient ) ) );
++		hasRepaint = true;
++	}
+ 	if ( ev->atom == ctx->atoms.gamescopeHDRItmSDRNits )
+ 	{
+ 		g_flHDRItmSdrNits = get_prop( ctx, ctx->root, ctx->atoms.gamescopeHDRItmSDRNits, 0 );
+@@ -7540,7 +7562,7 @@ void update_wayland_res(CommitDoneList_t *doneCommits, steamcompmgr_win_t *w, Re
+ 					vulkan_wait( *s_ulLastPreemptiveUpscaleSeqNo, true );
+ 				}
+ 
+-				std::optional<uint64_t> seqNo = vulkan_composite( &upscaledFrameInfo, nullptr, false, pTempImage->pTexture, false, std::move( pCommandBuffer ) );
++				std::optional<uint64_t> seqNo = vulkan_composite( &upscaledFrameInfo, nullptr, false, VulkanCompositePurpose::Auxiliary, pTempImage->pTexture, false, std::move( pCommandBuffer ) );
+ 
+ 				if ( cv_upscale_preemptive_debug_force_sync )
+ 				{
+@@ -8069,6 +8091,9 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
+ 	ctx->atoms.gamescopeSDRInputGain = XInternAtom( ctx->dpy, "GAMESCOPE_SDR_INPUT_GAIN", false );
+ 	ctx->atoms.gamescopeHDRItmSupported = XInternAtom( ctx->dpy, gamescope::autohdr::SupportedAtomName.data(), false );
+ 	ctx->atoms.gamescopeHDRItmEnable = XInternAtom( ctx->dpy, gamescope::autohdr::EnableAtomName.data(), false );
++	ctx->atoms.gamescopeHDRItmSupportedModes = XInternAtom( ctx->dpy, gamescope::autohdr::SupportedModesAtomName.data(), false );
++	ctx->atoms.gamescopeHDRItmMode = XInternAtom( ctx->dpy, gamescope::autohdr::ModeAtomName.data(), false );
++	ctx->atoms.gamescopeHDRItmEffectiveMode = XInternAtom( ctx->dpy, gamescope::autohdr::EffectiveModeAtomName.data(), false );
+ 	ctx->atoms.gamescopeHDRItmSDRNits = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_ITM_SDR_NITS", false );
+ 	ctx->atoms.gamescopeHDRItmTargetNits = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_ITM_TARGET_NITS", false );
+ 	ctx->atoms.gamescopeAutoHDRActiveFeedback = XInternAtom( ctx->dpy, gamescope::autohdr::ActiveFeedbackAtomName.data(), false );
+@@ -8256,11 +8281,20 @@ void update_vrr_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush =
+ static void publish_initial_auto_hdr_atoms( xwayland_ctx_t *root_ctx )
+ {
+ 	const gamescope::autohdr::RootPropertyValues values =
+-		gamescope::autohdr::initialRootPropertyValues( g_bHDRItmEnable );
++		gamescope::autohdr::initialRootPropertyValues(
++			g_bHDRItmEnable,
++			g_eAutoHDRMode,
++			vulkan_auto_hdr_adaptive_supported() );
+ 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmSupported,
+ 		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.supported ), 1 );
+ 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmEnable,
+ 		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.enabled ), 1 );
++	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmSupportedModes,
++		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.supportedModes ), 1 );
++	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmMode,
++		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.requestedMode ), 1 );
++	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmEffectiveMode,
++		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.effectiveMode ), 1 );
+ 	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeAutoHDRActiveFeedback,
+ 		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.active ), 1 );
+ }
+@@ -8552,6 +8586,18 @@ steamcompmgr_main(int argc, char **argv)
+ 					g_bForceHDR10OutputDebug = true;
+ 				} else if (strcmp(opt_name, "hdr-itm-enabled") == 0 || strcmp(opt_name, "hdr-itm-enable") == 0) {
+ 					g_bHDRItmEnable = true;
++				} else if (strcmp(opt_name, "hdr-itm-mode") == 0) {
++					if (strcmp(optarg, "high-quality") == 0)
++						g_eAutoHDRMode = gamescope::autohdr::Mode::HighQuality;
++					else if (strcmp(optarg, "efficient") == 0)
++						g_eAutoHDRMode = gamescope::autohdr::Mode::Efficient;
++					else
++					{
++						auto_hdr_log.errorf(
++							"invalid --hdr-itm-mode '%s'; using efficient",
++							optarg );
++						g_eAutoHDRMode = gamescope::autohdr::Mode::Efficient;
++					}
+ 				} else if (strcmp(opt_name, "sdr-gamut-wideness") == 0) {
+ 					g_ColorMgmt.pending.sdrGamutWideness = atof(optarg);
+ 				} else if (strcmp(opt_name, "hdr-sdr-content-nits") == 0) {
+@@ -9081,6 +9127,28 @@ steamcompmgr_main(int argc, char **argv)
+ 
+ 
+ 		{
++			const uint32_t supportedAutoHDRModes =
++				uint32_t( gamescope::autohdr::Mode::Efficient ) |
++				( vulkan_auto_hdr_adaptive_supported()
++					? uint32_t( gamescope::autohdr::Mode::HighQuality )
++					: 0u );
++			if ( supportedAutoHDRModes !=
++				 g_uAutoHDRSupportedModesCached )
++			{
++				XChangeProperty(
++					root_ctx->dpy,
++					root_ctx->root,
++					root_ctx->atoms.gamescopeHDRItmSupportedModes,
++					XA_CARDINAL,
++					32,
++					PropModeReplace,
++					reinterpret_cast<const unsigned char *>(
++						&supportedAutoHDRModes ),
++					1 );
++				g_uAutoHDRSupportedModesCached =
++					supportedAutoHDRModes;
++				flush_root = true;
++			}
+ 			if ( g_bAutoHDRActive != g_bAutoHDRActiveCached )
+ 			{
+ 				const uint32_t active = g_bAutoHDRActive ? 1u : 0u;
+@@ -9089,6 +9157,30 @@ steamcompmgr_main(int argc, char **argv)
+ 				g_bAutoHDRActiveCached = g_bAutoHDRActive;
+ 				flush_root = true;
+ 			}
++			const gamescope::autohdr::Mode effectiveAutoHDRMode =
++				!g_bAutoHDRActiveCached
++					? gamescope::autohdr::Mode::Off
++					: ( g_eAutoHDRMode ==
++							gamescope::autohdr::Mode::HighQuality &&
++						vulkan_auto_hdr_adaptive_effective() )
++						? gamescope::autohdr::Mode::HighQuality
++						: gamescope::autohdr::Mode::Efficient;
++			if ( effectiveAutoHDRMode != g_eAutoHDREffectiveModeCached )
++			{
++				const uint32_t effective =
++					uint32_t( effectiveAutoHDRMode );
++				XChangeProperty(
++					root_ctx->dpy,
++					root_ctx->root,
++					root_ctx->atoms.gamescopeHDRItmEffectiveMode,
++					XA_CARDINAL,
++					32,
++					PropModeReplace,
++					reinterpret_cast<const unsigned char *>( &effective ),
++					1 );
++				g_eAutoHDREffectiveModeCached = effectiveAutoHDRMode;
++				flush_root = true;
++			}
+ 
+ 			GamescopeAppTextureColorspace current_app_colorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB;
+ 			std::shared_ptr<gamescope::BackendBlob> app_hdr_metadata = nullptr;
+diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
+index fc8d96e3..0706b991 100644
+--- a/src/xwayland_ctx.hpp
++++ b/src/xwayland_ctx.hpp
+@@ -212,6 +212,9 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
+ 		Atom gamescopeSDRInputGain;
+ 		Atom gamescopeHDRItmSupported;
+ 		Atom gamescopeHDRItmEnable;
++		Atom gamescopeHDRItmSupportedModes;
++		Atom gamescopeHDRItmMode;
++		Atom gamescopeHDRItmEffectiveMode;
+ 		Atom gamescopeHDRItmSDRNits;
+ 		Atom gamescopeHDRItmTargetNits;
+ 		Atom gamescopeAutoHDRActiveFeedback;
+diff --git a/tests/meson.build b/tests/meson.build
+index d6b18680..305b2c15 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -32,6 +32,14 @@ test_auto_hdr_color = executable(
+ )
+ test('auto-hdr-color', test_auto_hdr_color)
+ 
++test_auto_hdr_adaptive = executable(
++	'test_auto_hdr_adaptive',
++	['test_auto_hdr_adaptive.cpp', '../src/AutoHDRAdaptive.cpp'],
++	include_directories: ['../src'],
++	cpp_args: gamescope_cpp_args + ['-fno-fast-math'],
++)
++test('auto-hdr-adaptive', test_auto_hdr_adaptive)
++
+ test_auto_hdr_gamut = executable(
+ 	'test_auto_hdr_gamut',
+ 	['test_auto_hdr_gamut.cpp', '../src/color_helpers.cpp'],
+diff --git a/tests/test_auto_hdr_adaptive.cpp b/tests/test_auto_hdr_adaptive.cpp
+new file mode 100644
+index 00000000..7ea5e208
+--- /dev/null
++++ b/tests/test_auto_hdr_adaptive.cpp
+@@ -0,0 +1,598 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRAdaptive.h"
++
++#include <array>
++#include <cmath>
++#include <cstdlib>
++#include <iostream>
++#include <limits>
++#include <string_view>
++#include <vector>
++
++using namespace gamescope::autohdr;
++
++namespace
++{
++	int failures = 0;
++
++	void check( bool condition, std::string_view message )
++	{
++		if ( condition )
++			return;
++		std::cerr << "FAIL: " << message << '\n';
++		failures++;
++	}
++
++	void near( double actual, double expected, double tolerance, std::string_view message )
++	{
++		if ( std::isfinite( actual ) && std::abs( actual - expected ) <= tolerance )
++			return;
++		std::cerr << "FAIL: " << message << " (actual=" << actual
++			<< ", expected=" << expected << ")\n";
++		failures++;
++	}
++
++	AdaptiveConfig testConfig()
++	{
++		AdaptiveConfig config;
++		config.enabled = true;
++		config.efficientCeilingNits = 550.0;
++		config.outputPeakNits = 650.0;
++		return config;
++	}
++
++	SceneStats sparseHighlight()
++	{
++		return { 0.12, 0.03, 1.0, 0.03, 1.0 };
++	}
++
++	SceneStats broadBrightField()
++	{
++		return { 0.72, 0.40, 1.0, 0.65, 1.0 };
++	}
++
++	FrameInput frame( const SceneStats &stats, double elapsedSeconds = 1.0 / 60.0 )
++	{
++		return { stats, elapsedSeconds, false, false };
++	}
++}
++
++int main()
++{
++	check( sceneAnalysisGrid( 0, 1080 ).width == 0,
++		"zero-width output has no analysis grid" );
++	const AnalysisGrid hdGrid = sceneAnalysisGrid( 1920, 1080 );
++	check( hdGrid.width == 96 && hdGrid.height == 54,
++		"16:9 grid preserves aspect ratio" );
++	const AnalysisGrid portraitGrid = sceneAnalysisGrid( 1080, 1920 );
++	check( portraitGrid.width == 54 && portraitGrid.height == 96,
++		"portrait grid preserves aspect ratio" );
++	const AnalysisGrid ultrawideGrid = sceneAnalysisGrid( 3440, 1440 );
++	check( ultrawideGrid.width == 96 && ultrawideGrid.height == 40,
++		"ultrawide grid preserves aspect ratio" );
++	const AnalysisGrid narrowGrid = sceneAnalysisGrid( 1000, 1 );
++	check( narrowGrid.width == 96 && narrowGrid.height == 32,
++		"short analysis axis has a 32-sample floor" );
++	check( hdGrid.width == GAMESCOPE_AUTO_HDR_ANALYSIS_LONG_AXIS &&
++			narrowGrid.height ==
++				GAMESCOPE_AUTO_HDR_ANALYSIS_MINIMUM_SHORT_AXIS,
++		"CPU grid uses shared production constants" );
++
++	const SceneSample hostileSample = sanitizeSceneSample( {
++		std::numeric_limits<double>::infinity(),
++		std::numeric_limits<double>::quiet_NaN(),
++	} );
++	near( hostileSample.luminance, 0.0, 0.0,
++		"nonfinite sample luminance sanitizes to black" );
++	near( hostileSample.coverage, 0.0, 0.0,
++		"nonfinite sample coverage sanitizes to uncovered" );
++	const SceneSample clampedSample = sanitizeSceneSample( { 2.0, 1.5 } );
++	near( clampedSample.luminance, 1.0, 0.0, "sample luminance clamps to one" );
++	near( clampedSample.coverage, 1.0, 0.0, "sample coverage clamps to one" );
++
++	// Uncovered letterbox samples do not count as scene black. Partial alpha
++	// contributes proportionally to both the numerator and valid denominator.
++	const std::array<SceneSample, 4> coverageSamples = {{
++		{ 0.0, 1.0 },
++		{ 1.0, 1.0 },
++		{ 0.0, 0.0 },
++		{ 1.0, 0.5 },
++	}};
++	const SceneStats coverageStats =
++		analyzeSceneSamples( coverageSamples.data(), coverageSamples.size() );
++	near( coverageStats.mean, 0.6, 1e-15,
++		"mean uses valid-coverage denominator" );
++	near( coverageStats.upperOccupancy, 0.6, 1e-15,
++		"upper occupancy uses valid-coverage denominator" );
++	near( coverageStats.broadFieldLoad, 0.6, 1e-15,
++		"broad load uses valid-coverage denominator" );
++	near( coverageStats.validCoverage, 0.625, 0.0,
++		"valid coverage includes alpha and excludes letterbox" );
++	check( coverageStats.approximatePeak > 0.99,
++		"credible covered highlights preserve approximate peak" );
++
++	const SceneStats emptyStats = analyzeSceneSamples( nullptr, 0 );
++	near( emptyStats.validCoverage, 0.0, 0.0, "empty scene has zero coverage" );
++	const std::array<SceneSample, 3> hostileSamples = {{
++		{ std::numeric_limits<double>::quiet_NaN(), 1.0 },
++		{ 1.0, std::numeric_limits<double>::infinity() },
++		{ -1.0, -1.0 },
++	}};
++	const SceneStats hostileStats =
++		analyzeSceneSamples( hostileSamples.data(), hostileSamples.size() );
++	near( hostileStats.mean, 0.0, 0.0, "hostile scene mean remains finite" );
++	near( hostileStats.approximatePeak, 0.0, 0.0,
++		"hostile scene peak remains finite" );
++	near( hostileStats.validCoverage, 1.0 / 3.0, 1e-15,
++		"only finite covered hostile sample contributes coverage" );
++
++	const std::size_t gridSampleCount =
++		std::size_t( hdGrid.width ) * hdGrid.height;
++	std::vector<SceneSample> sparseSamples( gridSampleCount, { 0.05, 1.0 } );
++	sparseSamples[0].luminance = 1.0;
++	const SceneStats onePixelStats =
++		analyzeSceneSamples( sparseSamples.data(), sparseSamples.size() );
++	check( onePixelStats.approximatePeak < 0.60,
++		"one unstable bright sample cannot force full peak" );
++	for ( std::size_t i = 0; i < 32; i++ )
++		sparseSamples[i].luminance = 1.0;
++	const SceneStats clusteredHighlightStats =
++		analyzeSceneSamples( sparseSamples.data(), sparseSamples.size() );
++	check( clusteredHighlightStats.approximatePeak > 0.95,
++		"compact credible highlight cluster approaches peak" );
++	check( clusteredHighlightStats.upperOccupancy > onePixelStats.upperOccupancy,
++		"soft upper occupancy responds to highlight area" );
++
++	std::vector<SceneSample> broadSamples( gridSampleCount, { 0.80, 1.0 } );
++	const SceneStats analyzedBroad =
++		analyzeSceneSamples( broadSamples.data(), broadSamples.size() );
++	check( analyzedBroad.mean > 0.79 && analyzedBroad.mean < 0.81,
++		"broad field mean preserved" );
++	check( analyzedBroad.broadFieldLoad > 0.92,
++		"soft broad-field load recognizes large bright area" );
++	check( analyzedBroad.upperOccupancy > 0.49 &&
++			analyzedBroad.upperOccupancy < 0.51,
++		"soft upper band remains gradual at its midpoint" );
++
++	AdaptiveConfig disabled;
++	check( !disabled.enabled, "adaptive mode defaults disabled" );
++	check( validAdaptiveConfig( disabled ), "safe disabled default config is valid" );
++	near( disabled.efficientCeilingNits,
++		GAMESCOPE_AUTO_HDR_DEFAULT_EFFICIENT_NITS, 0.0,
++		"default config uses shared efficient ceiling" );
++	near( disabled.minimumValidCoverage,
++		GAMESCOPE_AUTO_HDR_MINIMUM_VALID_COVERAGE, 0.0,
++		"default config uses shared coverage threshold" );
++	near( desiredContentCeilingNits( sparseHighlight(), disabled ),
++		GAMESCOPE_AUTO_HDR_DEFAULT_EFFICIENT_NITS, 0.0,
++		"disabled desired ceiling is efficient baseline" );
++
++	const AdaptiveConfig config = testConfig();
++	check( validAdaptiveConfig( config ), "Odin development config valid" );
++	const AdaptiveStateTexels validState{
++		600.0, 0.25, 0.90, 0.10, -1.0, 1.0, 590.0, 0.95 };
++	check( validAdaptiveStateTexels( validState, config ),
++		"both temporal-state texels accept valid boundaries" );
++	for ( const AdaptiveStateTexels &invalidState : {
++		AdaptiveStateTexels{
++			std::numeric_limits<double>::quiet_NaN(),
++			0.25, 0.90, 0.10, -1.0, 1.0, 590.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 1.01, 0.90, 0.10, -1.0, 1.0, 590.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 0.25, -0.01, 0.10, -1.0, 1.0, 590.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 0.25, 0.90, -0.01, -1.0, 1.0, 590.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 0.25, 0.90, 0.10, 0.5, 1.0, 590.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 0.25, 0.90, 0.10, 0.0, 0.5, 590.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 0.25, 0.90, 0.10, 0.0, 1.0, 651.0, 0.95 },
++		AdaptiveStateTexels{
++			600.0, 0.25, 0.90, 0.10, 0.0, 1.0, 590.0, 1.01 },
++	} )
++		check( !validAdaptiveStateTexels( invalidState, config ),
++			"host state policy rejects malformed texel component" );
++	for ( const auto &invalid : {
++		[] {
++			auto value = testConfig();
++			value.outputPeakNits = 549.0;
++			return value;
++		}(),
++		[] {
++			auto value = testConfig();
++			value.maximumBroadFieldProtection = 1.1;
++			return value;
++		}(),
++		[] {
++			auto value = testConfig();
++			value.peakFull = value.peakStart;
++			return value;
++		}(),
++		[] {
++			auto value = testConfig();
++			value.restorationTimeConstantSeconds = 0.0;
++			return value;
++		}(),
++		[] {
++			auto value = testConfig();
++			value.sceneCutMeanDelta = 0.0;
++			return value;
++		}(),
++		[] {
++			auto value = testConfig();
++			value.sceneCutPeakDelta = 0.0;
++			return value;
++		}(),
++		[] {
++			auto value = testConfig();
++			value.maximumElapsedSeconds =
++				std::numeric_limits<double>::quiet_NaN();
++			return value;
++		}(),
++	} )
++		check( !validAdaptiveConfig( invalid ), "invalid adaptive config rejected" );
++
++	const SceneStats hostile = sanitizeSceneStats( {
++		-1.0,
++		std::numeric_limits<double>::infinity(),
++		std::numeric_limits<double>::quiet_NaN(),
++		2.0,
++		-0.5,
++	} );
++	near( hostile.mean, 0.0, 0.0, "negative mean sanitizes to zero" );
++	near( hostile.upperOccupancy, 0.0, 0.0, "infinite occupancy sanitizes to zero" );
++	near( hostile.approximatePeak, 0.0, 0.0, "NaN peak sanitizes to zero" );
++	near( hostile.broadFieldLoad, 1.0, 0.0, "broad load clamps to one" );
++	near( hostile.validCoverage, 0.0, 0.0, "negative coverage sanitizes to zero" );
++	check( !validSceneStats( {
++			-1.0,
++			std::numeric_limits<double>::infinity(),
++			std::numeric_limits<double>::quiet_NaN(),
++			2.0,
++			-0.5,
++		} ),
++		"raw hostile statistics are invalid before sanitization" );
++	check( validSceneStats( { 0.0, 1.0, 0.0, 1.0, 0.0 } ),
++		"raw statistic boundaries are valid" );
++
++	near( desiredContentCeilingNits( { 0.0, 0.0, 0.0, 0.0, 1.0 }, config ),
++		550.0, 0.0, "dark scene without highlights stays efficient" );
++	near( desiredContentCeilingNits( sparseHighlight(), config ),
++		650.0, 1e-12, "sparse strong highlight requests full peak" );
++	const double broadDesired = desiredContentCeilingNits( broadBrightField(), config );
++	check( broadDesired > 550.0 && broadDesired < 570.0,
++		"broad bright field receives soft but nonzero headroom" );
++	near( desiredContentCeilingNits( { 0.0, 0.0, 1.0, 0.0, 0.79 }, config ),
++		550.0, 0.0, "low coverage fails closed to efficient ceiling" );
++	check( desiredContentCeilingNits( { 0.0, 0.03, 1.0, 0.0, 0.80 }, config ) >
++			550.0,
++		"coverage equal to the minimum is eligible" );
++
++	AdaptiveController controller;
++	check( !controller.initialized(), "controller starts uninitialized" );
++	auto result = controller.update( frame( sparseHighlight() ), disabled );
++	near( result.contentCeilingNits, 203.0, 0.0, "disabled update uses efficient baseline" );
++	check( result.freezeReason == FreezeReason::Disabled, "disabled update explains freeze" );
++
++	controller.reset();
++	result = controller.update( frame( sparseHighlight() ), config );
++	near( result.contentCeilingNits, 550.0, 0.0, "first frame initializes at efficient baseline" );
++	check( result.freezeReason == FreezeReason::Dwell, "restoration waits for dwell" );
++
++	// Restoration begins only after a persistent direction and uses the slower
++	// time constant.
++	for ( int i = 0; i < 13; i++ )
++		result = controller.update( frame( sparseHighlight() ), config );
++	near( result.contentCeilingNits, 550.0, 0.0, "restoration remains frozen before dwell" );
++	result = controller.update( frame( sparseHighlight() ), config );
++	const double expectedRestored =
++		550.0 + ( 1.0 - std::exp( -( 1.0 / 60.0 ) / 0.55 ) ) * 100.0;
++	near( result.contentCeilingNits, expectedRestored, 1e-12,
++		"restoration uses elapsed-time exponential smoothing" );
++	check( result.updated, "restoration update reported" );
++
++	// Duplicated, zero-time, transitional, low-coverage, and excessive-time
++	// frames cannot advance the scalar.
++	const double held = controller.contentCeilingNits();
++	auto duplicate = frame( sparseHighlight() );
++	duplicate.duplicated = true;
++	result = controller.update( duplicate, config );
++	near( result.contentCeilingNits, held, 0.0, "duplicated frame freezes state" );
++	check( result.freezeReason == FreezeReason::DuplicatedFrame,
++		"duplicated frame freeze reason" );
++	result = controller.update( frame( sparseHighlight(), 0.0 ), config );
++	near( result.contentCeilingNits, held, 0.0, "zero elapsed time freezes state" );
++	check( result.freezeReason == FreezeReason::InvalidElapsedTime,
++		"zero elapsed time freeze reason" );
++	result = controller.update( frame(
++		sparseHighlight(), std::numeric_limits<double>::quiet_NaN() ), config );
++	near( result.contentCeilingNits, held, 0.0, "nonfinite elapsed time freezes state" );
++	check( result.freezeReason == FreezeReason::InvalidElapsedTime,
++		"nonfinite elapsed time freeze reason" );
++	auto transitional = frame( sparseHighlight() );
++	transitional.transitional = true;
++	result = controller.update( transitional, config );
++	near( result.contentCeilingNits, held, 0.0, "transitional frame freezes state" );
++	check( result.freezeReason == FreezeReason::TransitionalFrame,
++		"transitional frame freeze reason" );
++	result = controller.update( frame( { 0.1, 0.03, 1.0, 0.0, 0.2 } ), config );
++	near( result.contentCeilingNits, held, 0.0, "low coverage freezes state" );
++	check( result.freezeReason == FreezeReason::InsufficientCoverage,
++		"low coverage freeze reason" );
++	result = controller.update( frame( sparseHighlight(), 0.5 ), config );
++	near( result.contentCeilingNits, 550.0, 0.0,
++		"excessive elapsed time resets to efficient ceiling" );
++	check( result.freezeReason == FreezeReason::ExcessiveElapsedTime,
++		"excessive elapsed time freeze reason" );
++	check( !controller.initialized(),
++		"excessive elapsed time clears initialized history" );
++	AdaptiveController hostileGap;
++	hostileGap.reset( 620.0 );
++	SceneStats hostileGapStats = sparseHighlight();
++	hostileGapStats.mean = std::numeric_limits<double>::quiet_NaN();
++	result = hostileGap.update( frame( hostileGapStats, 0.5 ), config );
++	near( result.contentCeilingNits, 550.0, 0.0,
++		"excessive elapsed time resets even with invalid scene statistics" );
++	check( result.freezeReason == FreezeReason::ExcessiveElapsedTime,
++		"excessive elapsed time takes reset precedence" );
++	AdaptiveConfig maximumIntervalConfig = config;
++	maximumIntervalConfig.reductionDwellSeconds = 0.0;
++	maximumIntervalConfig.restorationDwellSeconds = 0.0;
++	AdaptiveController maximumInterval;
++	maximumInterval.reset( 550.0 );
++	result = maximumInterval.update(
++		frame( sparseHighlight(), config.maximumElapsedSeconds ), maximumIntervalConfig );
++	check( result.freezeReason != FreezeReason::ExcessiveElapsedTime,
++		"maximum permitted elapsed time remains eligible" );
++	check( result.updated, "maximum permitted elapsed time advances state" );
++
++	// A new stable frame after a long gap starts a fresh Efficient sequence.
++	result = controller.update( frame( sparseHighlight() ), config );
++	near( result.contentCeilingNits, 550.0, 0.0, "post-gap frame starts at Efficient" );
++	check( result.freezeReason == FreezeReason::Dwell, "post-gap dwell restarted" );
++
++	// A full downward cut may shed all stale headroom immediately.
++	controller.reset( 650.0 );
++	controller.update( frame( sparseHighlight() ), config );
++	result = controller.update( frame( broadBrightField() ), config );
++	check( result.sceneCut, "large mean change detected as scene cut" );
++	near( result.contentCeilingNits, broadDesired, 1e-12,
++		"scene cut snaps to new broad-field target" );
++
++	// The cut accelerator is continuous at both the half-threshold start and
++	// full-threshold end. Alternating on either side cannot toggle between
++	// binary no-cut and full-cut states.
++	const SceneStats cutReference{ 0.10, 0.03, 1.0, 0.03, 1.0 };
++	constexpr double boundaryEpsilon = 1e-7;
++	auto meanDeltaStats = [&]( double delta )
++	{
++		SceneStats value = cutReference;
++		value.mean += delta;
++		return value;
++	};
++	auto peakDeltaStats = [&]( double delta )
++	{
++		SceneStats value = cutReference;
++		value.approximatePeak -= delta;
++		return value;
++	};
++	near( sceneCutSignal(
++			meanDeltaStats( 0.5 * config.sceneCutMeanDelta ),
++			cutReference,
++			config ),
++		0.0,
++		0.0,
++		"cut signal is zero at half mean threshold" );
++	near( sceneCutSignal(
++			meanDeltaStats( config.sceneCutMeanDelta ),
++			cutReference,
++			config ),
++		1.0,
++		0.0,
++		"cut signal is one at full mean threshold" );
++	near( sceneCutSignal(
++			peakDeltaStats( 0.5 * config.sceneCutPeakDelta ),
++			cutReference,
++			config ),
++		0.0,
++		0.0,
++		"cut signal is zero at half peak threshold" );
++	near( sceneCutSignal(
++			peakDeltaStats( config.sceneCutPeakDelta ),
++			cutReference,
++			config ),
++		1.0,
++		0.0,
++		"cut signal is one at full peak threshold" );
++	const double halfBelow = sceneCutSignal(
++		meanDeltaStats( 0.5 * config.sceneCutMeanDelta - boundaryEpsilon ),
++		cutReference,
++		config );
++	const double halfAbove = sceneCutSignal(
++		meanDeltaStats( 0.5 * config.sceneCutMeanDelta + boundaryEpsilon ),
++		cutReference,
++		config );
++	check( halfBelow == 0.0 && halfAbove < 1e-10,
++		"alternating half-boundary signal remains continuous" );
++	const double fullBelow = sceneCutSignal(
++		meanDeltaStats( config.sceneCutMeanDelta - boundaryEpsilon ),
++		cutReference,
++		config );
++	const double fullAbove = sceneCutSignal(
++		meanDeltaStats( config.sceneCutMeanDelta + boundaryEpsilon ),
++		cutReference,
++		config );
++	check( fullBelow > 1.0 - 1e-10 && fullAbove == 1.0,
++		"alternating full-boundary signal remains continuous" );
++	for ( int i = 0; i < 100; i++ )
++	{
++		const double side = i & 1 ? -boundaryEpsilon : boundaryEpsilon;
++		const double alternatingHalf = sceneCutSignal(
++			meanDeltaStats( 0.5 * config.sceneCutMeanDelta + side ),
++			cutReference,
++			config );
++		const double alternatingFull = sceneCutSignal(
++			meanDeltaStats( config.sceneCutMeanDelta + side ),
++			cutReference,
++			config );
++		check( alternatingHalf < 1e-10,
++			"alternating half-boundary input does not toggle cut strength" );
++		check( alternatingFull > 1.0 - 1e-10,
++			"alternating full-boundary input does not toggle cut strength" );
++	}
++
++	// A strong upward edit clears prior dwell but cannot use the cut
++	// accelerator to snap content brighter.
++	AdaptiveController upwardCut;
++	upwardCut.reset( 550.0 );
++	const SceneStats darkScene{ 0.02, 0.0, 0.10, 0.0, 1.0 };
++	upwardCut.update( frame( darkScene ), config );
++	result = upwardCut.update( frame( sparseHighlight() ), config );
++	near( result.contentCeilingNits, 550.0, 0.0,
++		"strong upward cut does not snap brighter" );
++	check( result.freezeReason == FreezeReason::Dwell,
++		"strong upward cut follows restoration dwell" );
++
++	// Every raw scene-stat field rejects NaN, infinity, and out-of-range
++	// values. Rejection holds content, clears pending dwell, and leaves the
++	// previously accepted scene intact.
++	std::vector<SceneStats> hostileStatsTable;
++	for ( int field = 0; field < 5; field++ )
++	{
++		for ( const double hostileValue : {
++			std::numeric_limits<double>::quiet_NaN(),
++			std::numeric_limits<double>::infinity(),
++			-std::numeric_limits<double>::infinity(),
++			-0.001,
++			1.001,
++		} )
++		{
++			SceneStats value = sparseHighlight();
++			switch ( field )
++			{
++				case 0: value.mean = hostileValue; break;
++				case 1: value.upperOccupancy = hostileValue; break;
++				case 2: value.approximatePeak = hostileValue; break;
++				case 3: value.broadFieldLoad = hostileValue; break;
++				case 4: value.validCoverage = hostileValue; break;
++			}
++			hostileStatsTable.push_back( value );
++		}
++	}
++	for ( const SceneStats &hostileStatsEntry : hostileStatsTable )
++	{
++		AdaptiveController hostileController;
++		hostileController.reset( 600.0 );
++		for ( int i = 0; i < 13; i++ )
++			hostileController.update( frame( sparseHighlight() ), config );
++		const double beforeHostile = hostileController.contentCeilingNits();
++		result = hostileController.update( frame( hostileStatsEntry ), config );
++		near( result.contentCeilingNits, beforeHostile, 0.0,
++			"invalid scene statistics hold scalar" );
++		check( result.freezeReason == FreezeReason::InvalidSceneStats,
++			"invalid scene statistics report explicit reason" );
++		result = hostileController.update( frame( sparseHighlight() ), config );
++		near( result.contentCeilingNits, beforeHostile, 0.0,
++			"invalid scene statistics clear pending dwell" );
++		check( result.freezeReason == FreezeReason::Dwell,
++			"valid frame after hostile input restarts dwell" );
++		check( !result.sceneCut,
++			"invalid scene statistics do not replace prior scene history" );
++	}
++
++	// Reduction is faster than restoration for equal deltas after their dwell.
++	AdaptiveConfig noDwell = config;
++	noDwell.reductionDwellSeconds = 0.0;
++	noDwell.restorationDwellSeconds = 0.0;
++	noDwell.sceneCutMeanDelta = 1.0;
++	noDwell.sceneCutPeakDelta = 1.0;
++	AdaptiveController reduction;
++	reduction.reset( 650.0 );
++	result = reduction.update( frame( { 0.12, 0.0, 0.0, 0.0, 1.0 } ), noDwell );
++	const double reductionStep = 650.0 - result.contentCeilingNits;
++	AdaptiveController restoration;
++	restoration.reset( 550.0 );
++	result = restoration.update( frame( sparseHighlight() ), noDwell );
++	const double restorationStep = result.contentCeilingNits - 550.0;
++	check( reductionStep > restorationStep * 4.0,
++		"reduction responds materially faster than restoration" );
++
++	// Differences inside the deadband do not cause chatter.
++	AdaptiveConfig deadbandConfig = config;
++	deadbandConfig.efficientCeilingNits = 646.5;
++	deadbandConfig.deadbandNits = 4.0;
++	AdaptiveController deadband;
++	deadband.reset( 646.5 );
++	result = deadband.update( frame( sparseHighlight() ), deadbandConfig );
++	near( result.contentCeilingNits, 646.5, 0.0, "deadband holds near target" );
++	check( result.freezeReason == FreezeReason::Deadband, "deadband freeze reason" );
++
++	// Once a direction is pending, a small reversal must clear the wider
++	// hysteresis boundary before changing direction.
++	AdaptiveConfig hysteresisConfig = noDwell;
++	hysteresisConfig.efficientCeilingNits = 550.0;
++	hysteresisConfig.outputPeakNits = 650.0;
++	hysteresisConfig.deadbandNits = 4.0;
++	hysteresisConfig.directionHysteresisNits = 3.0;
++	hysteresisConfig.restorationTimeConstantSeconds = 1000.0;
++	AdaptiveController hysteresis;
++	hysteresis.reset( 600.0 );
++	result = hysteresis.update( frame( sparseHighlight() ), hysteresisConfig );
++	check( result.updated, "hysteresis fixture establishes restoration direction" );
++	const double hysteresisHeld = result.contentCeilingNits;
++	result = hysteresis.update(
++		frame( { 0.0, 0.0, 0.876, 0.0, 1.0 } ), hysteresisConfig );
++	near( result.contentCeilingNits, hysteresisHeld, 0.0,
++		"small reversal held inside hysteresis band" );
++	check( result.freezeReason == FreezeReason::Hysteresis,
++		"hysteresis freeze reason" );
++
++	// One-code and two-code peak oscillations remain inside the deadband and
++	// cannot make the accepted scalar chatter.
++	AdaptiveController codeOscillation;
++	SceneStats codeBase{ 0.10, 0.0, 0.876, 0.0, 1.0 };
++	const double codeBaseCeiling = desiredContentCeilingNits( codeBase, config );
++	codeOscillation.reset( codeBaseCeiling );
++	for ( int i = 0; i < 240; i++ )
++	{
++		const double codeDelta = ( i & 1 ? 1.0 : -1.0 ) *
++			( i & 2 ? 2.0 : 1.0 ) / 1023.0;
++		SceneStats varied = codeBase;
++		varied.approximatePeak += codeDelta;
++		result = codeOscillation.update( frame( varied ), config );
++		near( result.contentCeilingNits, codeBaseCeiling, 0.0,
++			"one-code and two-code oscillation holds accepted scalar" );
++		check( !result.updated, "code oscillation does not report scalar update" );
++	}
++
++	controller.reset();
++	check( !controller.initialized(), "reset clears initialized state" );
++	near( controller.contentCeilingNits(), 0.0, 0.0, "reset clears scalar" );
++
++	AdaptiveConfig invalid = config;
++	invalid.outputPeakNits = 0.0;
++	result = controller.update( frame( sparseHighlight() ), invalid );
++	near( result.contentCeilingNits, 550.0, 0.0, "invalid config fails closed" );
++	check( result.freezeReason == FreezeReason::InvalidConfig,
++		"invalid config failure reported" );
++	invalid.efficientCeilingNits = std::numeric_limits<double>::quiet_NaN();
++	result = controller.update( frame( sparseHighlight() ), invalid );
++	near( result.contentCeilingNits, 203.0, 0.0,
++		"invalid efficient ceiling uses conservative finite fallback" );
++	invalid.efficientCeilingNits = 10001.0;
++	result = controller.update( frame( sparseHighlight() ), invalid );
++	near( result.contentCeilingNits, 203.0, 0.0,
++		"out-of-range efficient ceiling uses conservative fallback" );
++
++	if ( failures != 0 )
++	{
++		std::cerr << failures << " adaptive Auto HDR test(s) failed\n";
++		return EXIT_FAILURE;
++	}
++
++	std::cout << "Adaptive Auto HDR tests passed\n";
++	return EXIT_SUCCESS;
++}
+diff --git a/tests/test_auto_hdr_root_properties.cpp b/tests/test_auto_hdr_root_properties.cpp
+index cea98131..22e995b4 100644
+--- a/tests/test_auto_hdr_root_properties.cpp
++++ b/tests/test_auto_hdr_root_properties.cpp
+@@ -26,16 +26,38 @@ int main()
+ 	check( SupportedAtomName == "GAMESCOPE_HDR_ITM_SUPPORTED", "support atom name" );
+ 	check( EnableAtomName == "GAMESCOPE_HDR_ITM_ENABLE", "enable atom name" );
+ 	check( ActiveFeedbackAtomName == "GAMESCOPE_AUTO_HDR_ACTIVE_FEEDBACK", "active feedback atom name" );
++	check( SupportedModesAtomName == "GAMESCOPE_HDR_ITM_SUPPORTED_MODES",
++		"supported modes atom name" );
++	check( ModeAtomName == "GAMESCOPE_HDR_ITM_MODE", "mode atom name" );
++	check( EffectiveModeAtomName == "GAMESCOPE_HDR_ITM_EFFECTIVE_MODE",
++		"effective mode atom name" );
+ 
+ 	const RootPropertyValues disabled = initialRootPropertyValues( false );
+ 	check( disabled.supported == 1u, "support is always published" );
+ 	check( disabled.enabled == 0u, "disabled launch publishes disabled state" );
+ 	check( disabled.active == 0u, "launch feedback is inactive" );
++	check( disabled.supportedModes == uint32_t( Mode::Efficient ),
++		"Efficient is the conservative supported mode" );
++	check( disabled.requestedMode == uint32_t( Mode::Efficient ),
++		"Efficient is the default requested mode" );
++	check( disabled.effectiveMode == uint32_t( Mode::Off ),
++		"disabled launch has Off effective mode" );
+ 
+-	const RootPropertyValues enabled = initialRootPropertyValues( true );
++	const RootPropertyValues enabled = initialRootPropertyValues(
++		true, Mode::HighQuality, true );
+ 	check( enabled.supported == 1u, "enabled launch still publishes support" );
+ 	check( enabled.enabled == 1u, "enabled launch publishes enabled state" );
+ 	check( enabled.active == 0u, "enabled launch is inactive without an eligible layer" );
++	check( enabled.supportedModes == SupportedModes,
++		"runtime capability publishes both modes" );
++	check( enabled.requestedMode == uint32_t( Mode::HighQuality ),
++		"requested High Quality mode is published" );
++	check( sanitizeRequestedMode( 0u ) == Mode::Efficient,
++		"Off is controlled by enable and mode zero sanitizes to Efficient" );
++	check( sanitizeRequestedMode( 99u ) == Mode::Efficient,
++		"invalid mode sanitizes to Efficient" );
++	check( sanitizeRequestedMode( 2u ) == Mode::HighQuality,
++		"High Quality mode is accepted" );
+ 	check( !activeFromLayerMask( 0u ), "zero effective layer mask is inactive" );
+ 	check( activeFromLayerMask( 0x00000001u ), "first effective layer is active" );
+ 	check( activeFromLayerMask( 0x80000000u ), "highest effective layer is active" );
+-- 
+2.51.0.windows.2
+

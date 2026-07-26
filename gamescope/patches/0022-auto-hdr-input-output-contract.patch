@@ -1,0 +1,515 @@
+From 3a639cff47cf6f5648c110298e0fdee1c760f390 Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Fri, 24 Jul 2026 16:55:13 -0400
+Subject: [PATCH] autohdr: tighten SDR input and output diagnostics
+
+---
+ src/AutoHDRInputContract.cpp           | 112 +++++++++++++++++++++++++
+ src/AutoHDRInputContract.h             |  69 +++++++++++++++
+ src/Backends/DRMBackend.cpp            |  10 +++
+ src/DRMFormatInfo.cpp                  |  43 ++++++++++
+ src/DRMFormatInfo.h                    |  12 +++
+ src/meson.build                        |   2 +
+ src/steamcompmgr.cpp                   |  27 +++++-
+ tests/meson.build                      |  13 +++
+ tests/test_auto_hdr_input_contract.cpp | 106 +++++++++++++++++++++++
+ 9 files changed, 393 insertions(+), 1 deletion(-)
+ create mode 100644 src/AutoHDRInputContract.cpp
+ create mode 100644 src/AutoHDRInputContract.h
+ create mode 100644 src/DRMFormatInfo.cpp
+ create mode 100644 src/DRMFormatInfo.h
+ create mode 100644 tests/test_auto_hdr_input_contract.cpp
+
+diff --git a/src/AutoHDRInputContract.cpp b/src/AutoHDRInputContract.cpp
+new file mode 100644
+index 00000000..db4e8385
+--- /dev/null
++++ b/src/AutoHDRInputContract.cpp
+@@ -0,0 +1,112 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRInputContract.h"
++
++namespace gamescope::autohdr
++{
++	namespace
++	{
++		bool supportsHardwareSRGBDecode( VkFormat format )
++		{
++			switch ( format )
++			{
++				case VK_FORMAT_B8G8R8A8_UNORM:
++				case VK_FORMAT_B8G8R8A8_SRGB:
++				case VK_FORMAT_R8G8B8A8_UNORM:
++				case VK_FORMAT_R8G8B8A8_SRGB:
++					return true;
++				default:
++					return false;
++			}
++		}
++	}
++
++	InputContract classifyInput(
++		bool metadataPresent,
++		VkFormat format,
++		VkColorSpaceKHR colorspace,
++		bool ycbcr ) noexcept
++	{
++		if ( ycbcr )
++		{
++			return {
++				.transfer = InputTransfer::Unknown,
++				.range = InputRange::Unknown,
++				.decode = InputDecode::None,
++				.reason = InputContractReason::YCbCrRangeUnspecified,
++			};
++		}
++
++		if ( !metadataPresent )
++		{
++			if ( format == VK_FORMAT_UNDEFINED )
++				return {};
++
++			// commit_t::colorspace() deliberately defines feedback-free RGB
++			// surfaces as nonlinear sRGB. Preserve that compositor contract so
++			// native OpenGL, EGL, software rendering, and other non-WSI clients
++			// do not lose Auto HDR coverage.
++			return {
++				.transfer = InputTransfer::SRGB,
++				.range = InputRange::Full,
++				.decode = supportsHardwareSRGBDecode( format )
++					? InputDecode::HardwareSRGBView
++					: InputDecode::ExplicitSRGB,
++				.reason = InputContractReason::ImplicitSRGBDefault,
++			};
++		}
++
++		switch ( colorspace )
++		{
++			case VK_COLOR_SPACE_SRGB_NONLINEAR_KHR:
++				return {
++					.transfer = InputTransfer::SRGB,
++					.range = InputRange::Full,
++					.decode = supportsHardwareSRGBDecode( format )
++						? InputDecode::HardwareSRGBView
++						: InputDecode::ExplicitSRGB,
++					.reason = InputContractReason::Eligible,
++				};
++
++			case VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT:
++				return {
++					.transfer = InputTransfer::ScRGBLinear,
++					.range = InputRange::Full,
++					.decode = InputDecode::None,
++					.reason = InputContractReason::NativeScRGB,
++				};
++
++			case VK_COLOR_SPACE_HDR10_ST2084_EXT:
++				return {
++					.transfer = InputTransfer::PQ,
++					.range = InputRange::Full,
++					.decode = InputDecode::None,
++					.reason = InputContractReason::NativePQ,
++				};
++
++			default:
++				return {
++					.transfer = InputTransfer::Unknown,
++					.range = InputRange::Unknown,
++					.decode = InputDecode::None,
++					.reason = InputContractReason::UnsupportedColorspace,
++				};
++		}
++	}
++
++	std::string_view inputContractReasonName( InputContractReason reason ) noexcept
++	{
++		switch ( reason )
++		{
++			case InputContractReason::Eligible: return "eligible-srgb-full-range";
++			case InputContractReason::ImplicitSRGBDefault:
++				return "eligible-implicit-srgb-default";
++			case InputContractReason::MissingMetadata: return "missing-client-color-metadata";
++			case InputContractReason::YCbCrRangeUnspecified: return "ycbcr-range-unspecified";
++			case InputContractReason::NativeScRGB: return "native-scrgb-bypass";
++			case InputContractReason::NativePQ: return "native-pq-bypass";
++			case InputContractReason::UnsupportedColorspace: return "unsupported-client-colorspace";
++		}
++		return "unknown";
++	}
++}
+diff --git a/src/AutoHDRInputContract.h b/src/AutoHDRInputContract.h
+new file mode 100644
+index 00000000..aefd56a3
+--- /dev/null
++++ b/src/AutoHDRInputContract.h
+@@ -0,0 +1,69 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#pragma once
++
++#include "vulkan_include.h"
++
++#include <cstdint>
++#include <string_view>
++
++namespace gamescope::autohdr
++{
++	enum class InputTransfer : uint8_t
++	{
++		Unknown = 0,
++		SRGB,
++		ScRGBLinear,
++		PQ,
++	};
++
++	enum class InputRange : uint8_t
++	{
++		Unknown = 0,
++		Full,
++	};
++
++	enum class InputDecode : uint8_t
++	{
++		None = 0,
++		HardwareSRGBView,
++		ExplicitSRGB,
++	};
++
++	enum class InputContractReason : uint8_t
++	{
++		Eligible = 0,
++		ImplicitSRGBDefault,
++		MissingMetadata,
++		YCbCrRangeUnspecified,
++		NativeScRGB,
++		NativePQ,
++		UnsupportedColorspace,
++	};
++
++	struct InputContract
++	{
++		InputTransfer transfer = InputTransfer::Unknown;
++		InputRange range = InputRange::Unknown;
++		InputDecode decode = InputDecode::None;
++		InputContractReason reason = InputContractReason::MissingMetadata;
++
++		constexpr bool autoHDREligible() const
++		{
++			return reason == InputContractReason::Eligible ||
++				reason == InputContractReason::ImplicitSRGBDefault;
++		}
++	};
++
++	// The swapchain feedback protocol exposes VkFormat and VkColorSpaceKHR, but
++	// no distinct gamma 2.2, gamma 2.4, BT.1886, linear-SDR, or quantization
++	// range fields. Feedback-free RGB surfaces retain Gamescope's established
++	// implicit sRGB default. Only classify states the compositor can represent.
++	InputContract classifyInput(
++		bool metadataPresent,
++		VkFormat format,
++		VkColorSpaceKHR colorspace,
++		bool ycbcr ) noexcept;
++
++	std::string_view inputContractReasonName( InputContractReason reason ) noexcept;
++}
+diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
+index d387f1ba..b68f2307 100644
+--- a/src/Backends/DRMBackend.cpp
++++ b/src/Backends/DRMBackend.cpp
+@@ -31,6 +31,7 @@
+ #include "backend.h"
+ #include "color_helpers.h"
+ #include "DRMComposition.h"
++#include "DRMFormatInfo.h"
+ #include "Utils/Defer.h"
+ #include "drm_include.h"
+ #include "edid.h"
+@@ -1429,6 +1430,15 @@ bool init_drm(struct drm_t *drm, int width, int height, int refresh)
+ 		}
+ 	}
+ 
++	drm_log.infof(
++		"KMS compositing formats selected: primary=%.*s (%u bpc), overlay=%.*s (%u bpc); kernel/display-engine dithering remains authoritative",
++		int( gamescope::drmFormatName( g_nDRMFormat ).size() ),
++		gamescope::drmFormatName( g_nDRMFormat ).data(),
++		unsigned( gamescope::drmFormatBitDepth( g_nDRMFormat ) ),
++		int( gamescope::drmFormatName( g_nDRMFormatOverlay ).size() ),
++		gamescope::drmFormatName( g_nDRMFormatOverlay ).data(),
++		unsigned( gamescope::drmFormatBitDepth( g_nDRMFormatOverlay ) ) );
++
+ 	std::thread flip_handler_thread( flip_handler_thread_run );
+ 	flip_handler_thread.detach();
+ 
+diff --git a/src/DRMFormatInfo.cpp b/src/DRMFormatInfo.cpp
+new file mode 100644
+index 00000000..7ccf5378
+--- /dev/null
++++ b/src/DRMFormatInfo.cpp
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "DRMFormatInfo.h"
++
++#include <drm_fourcc.h>
++
++namespace gamescope
++{
++	uint8_t drmFormatBitDepth( uint32_t format ) noexcept
++	{
++		switch ( format )
++		{
++			case DRM_FORMAT_XRGB2101010:
++			case DRM_FORMAT_ARGB2101010:
++			case DRM_FORMAT_XBGR2101010:
++			case DRM_FORMAT_ABGR2101010:
++				return 10;
++			case DRM_FORMAT_XRGB8888:
++			case DRM_FORMAT_ARGB8888:
++			case DRM_FORMAT_XBGR8888:
++			case DRM_FORMAT_ABGR8888:
++				return 8;
++			default:
++				return 0;
++		}
++	}
++
++	std::string_view drmFormatName( uint32_t format ) noexcept
++	{
++		switch ( format )
++		{
++			case DRM_FORMAT_XRGB2101010: return "XRGB2101010";
++			case DRM_FORMAT_ARGB2101010: return "ARGB2101010";
++			case DRM_FORMAT_XBGR2101010: return "XBGR2101010";
++			case DRM_FORMAT_ABGR2101010: return "ABGR2101010";
++			case DRM_FORMAT_XRGB8888: return "XRGB8888";
++			case DRM_FORMAT_ARGB8888: return "ARGB8888";
++			case DRM_FORMAT_XBGR8888: return "XBGR8888";
++			case DRM_FORMAT_ABGR8888: return "ABGR8888";
++			default: return "unknown";
++		}
++	}
++}
+diff --git a/src/DRMFormatInfo.h b/src/DRMFormatInfo.h
+new file mode 100644
+index 00000000..6365e5a3
+--- /dev/null
++++ b/src/DRMFormatInfo.h
+@@ -0,0 +1,12 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#pragma once
++
++#include <cstdint>
++#include <string_view>
++
++namespace gamescope
++{
++	uint8_t drmFormatBitDepth( uint32_t format ) noexcept;
++	std::string_view drmFormatName( uint32_t format ) noexcept;
++}
+diff --git a/src/meson.build b/src/meson.build
+index 78f1eb27..f62f88c3 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -105,7 +105,9 @@ src = [
+   'Script/Script.cpp',
+   'BufferMemo.cpp',
+   'AutoHDRAdaptive.cpp',
++  'AutoHDRInputContract.cpp',
+   'AutoHDRPolicy.cpp',
++  'DRMFormatInfo.cpp',
+   'steamcompmgr.cpp',
+   'convar.cpp',
+   'convar_script.cpp',
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 6bd441a3..9e5a680a 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -31,6 +31,7 @@
+ 
+ #include "backend.h"
+ #include "AutoHDRPolicy.h"
++#include "AutoHDRInputContract.h"
+ #include "AutoHDRRootProperties.h"
+ #include "HDRGamma22.h"
+ #include "gamescope_shared.h"
+@@ -2293,7 +2294,7 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
+ 	}
+ 
+ 	layer->eAlphaBlendingMode = ( flags & PaintWindowFlag::CoverageMode ) ? ALPHA_BLENDING_MODE_COVERAGE : ALPHA_BLENDING_MODE_PREMULTIPLIED;
+-	layer->autoHDRCandidate =
++	const bool sceneCandidate =
+ 		( flags & PaintWindowFlag::BasePlane ) &&
+ 		w->appID != 0 &&
+ 		!lastCommit->is_steam &&
+@@ -2306,6 +2307,30 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
+ 		!w->isOverlay &&
+ 		!w->isExternalOverlay &&
+ 		!( flags & PaintWindowFlag::NotificationMode );
++	const gamescope::autohdr::InputContract inputContract =
++		gamescope::autohdr::classifyInput(
++			lastCommit->feedback.has_value(),
++			layer->tex ? layer->tex->format() : VK_FORMAT_UNDEFINED,
++			lastCommit->feedback ? lastCommit->feedback->vk_colorspace : VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++			layer->isYcbcr() );
++	layer->autoHDRCandidate = sceneCandidate && inputContract.autoHDREligible();
++
++	const bool unrepresentableInput =
++		inputContract.reason == gamescope::autohdr::InputContractReason::MissingMetadata ||
++		inputContract.reason == gamescope::autohdr::InputContractReason::YCbCrRangeUnspecified ||
++		inputContract.reason == gamescope::autohdr::InputContractReason::UnsupportedColorspace;
++	if ( sceneCandidate && unrepresentableInput )
++	{
++		static bool s_loggedUnrepresentableInputContract = false;
++		if ( !s_loggedUnrepresentableInputContract )
++		{
++			auto_hdr_log.warnf(
++				"Auto HDR input bypassed (%.*s): swapchain feedback exposes only VkFormat and VkColorSpaceKHR; gamma 2.2, gamma 2.4, BT.1886, linear SDR, and limited-range SDR cannot be distinguished and are not guessed",
++				int( gamescope::autohdr::inputContractReasonName( inputContract.reason ).size() ),
++				gamescope::autohdr::inputContractReasonName( inputContract.reason ).data() );
++			s_loggedUnrepresentableInputContract = true;
++		}
++	}
+ 
+ 	return layer;
+ }
+diff --git a/tests/meson.build b/tests/meson.build
+index 305b2c15..4d08a1ff 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -40,6 +40,19 @@ test_auto_hdr_adaptive = executable(
+ )
+ test('auto-hdr-adaptive', test_auto_hdr_adaptive)
+ 
++test_auto_hdr_input_contract = executable(
++	'test_auto_hdr_input_contract',
++	[
++		'test_auto_hdr_input_contract.cpp',
++		'../src/AutoHDRInputContract.cpp',
++		'../src/DRMFormatInfo.cpp',
++	],
++	include_directories: ['../src'],
++	dependencies: [catch2_dep, vulkan_dep, drm_dep],
++	cpp_args: gamescope_cpp_args,
++)
++test('auto-hdr-input-contract', test_auto_hdr_input_contract)
++
+ test_auto_hdr_gamut = executable(
+ 	'test_auto_hdr_gamut',
+ 	['test_auto_hdr_gamut.cpp', '../src/color_helpers.cpp'],
+diff --git a/tests/test_auto_hdr_input_contract.cpp b/tests/test_auto_hdr_input_contract.cpp
+new file mode 100644
+index 00000000..7ccdd39a
+--- /dev/null
++++ b/tests/test_auto_hdr_input_contract.cpp
+@@ -0,0 +1,106 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRInputContract.h"
++#include "DRMFormatInfo.h"
++
++#include <catch2/catch_test_macros.hpp>
++#include <drm_fourcc.h>
++
++using namespace gamescope::autohdr;
++
++TEST_CASE("Auto HDR accepts only explicitly represented full-range sRGB RGB input")
++{
++	const InputContract hardware = classifyInput(
++		true,
++		VK_FORMAT_B8G8R8A8_UNORM,
++		VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++		false );
++	CHECK( hardware.transfer == InputTransfer::SRGB );
++	CHECK( hardware.range == InputRange::Full );
++	CHECK( hardware.decode == InputDecode::HardwareSRGBView );
++	CHECK( hardware.autoHDREligible() );
++
++	const InputContract explicitDecode = classifyInput(
++		true,
++		VK_FORMAT_A2B10G10R10_UNORM_PACK32,
++		VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++		false );
++	CHECK( explicitDecode.transfer == InputTransfer::SRGB );
++	CHECK( explicitDecode.range == InputRange::Full );
++	CHECK( explicitDecode.decode == InputDecode::ExplicitSRGB );
++	CHECK( explicitDecode.autoHDREligible() );
++}
++
++TEST_CASE("Auto HDR fails closed when client metadata cannot distinguish the input contract")
++{
++	const InputContract implicit = classifyInput(
++		false,
++		VK_FORMAT_B8G8R8A8_UNORM,
++		VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++		false );
++	CHECK( implicit.transfer == InputTransfer::SRGB );
++	CHECK( implicit.range == InputRange::Full );
++	CHECK( implicit.decode == InputDecode::HardwareSRGBView );
++	CHECK( implicit.reason == InputContractReason::ImplicitSRGBDefault );
++	CHECK( implicit.autoHDREligible() );
++
++	const InputContract missing = classifyInput(
++		false,
++		VK_FORMAT_UNDEFINED,
++		VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++		false );
++	CHECK( missing.transfer == InputTransfer::Unknown );
++	CHECK( missing.range == InputRange::Unknown );
++	CHECK( missing.reason == InputContractReason::MissingMetadata );
++	CHECK_FALSE( missing.autoHDREligible() );
++
++	const InputContract ycbcr = classifyInput(
++		true,
++		VK_FORMAT_G8_B8R8_2PLANE_420_UNORM,
++		VK_COLOR_SPACE_SRGB_NONLINEAR_KHR,
++		true );
++	CHECK( ycbcr.reason == InputContractReason::YCbCrRangeUnspecified );
++	CHECK( ycbcr.range == InputRange::Unknown );
++	CHECK_FALSE( ycbcr.autoHDREligible() );
++
++	const InputContract unknown = classifyInput(
++		true,
++		VK_FORMAT_B8G8R8A8_UNORM,
++		static_cast<VkColorSpaceKHR>( 0x7fffffff ),
++		false );
++	CHECK( unknown.reason == InputContractReason::UnsupportedColorspace );
++	CHECK_FALSE( unknown.autoHDREligible() );
++}
++
++TEST_CASE("Native scRGB and PQ remain bypass states")
++{
++	const InputContract scrgb = classifyInput(
++		true,
++		VK_FORMAT_R16G16B16A16_SFLOAT,
++		VK_COLOR_SPACE_EXTENDED_SRGB_LINEAR_EXT,
++		false );
++	CHECK( scrgb.transfer == InputTransfer::ScRGBLinear );
++	CHECK( scrgb.decode == InputDecode::None );
++	CHECK( scrgb.reason == InputContractReason::NativeScRGB );
++	CHECK_FALSE( scrgb.autoHDREligible() );
++
++	const InputContract pq = classifyInput(
++		true,
++		VK_FORMAT_A2B10G10R10_UNORM_PACK32,
++		VK_COLOR_SPACE_HDR10_ST2084_EXT,
++		false );
++	CHECK( pq.transfer == InputTransfer::PQ );
++	CHECK( pq.decode == InputDecode::None );
++	CHECK( pq.reason == InputContractReason::NativePQ );
++	CHECK_FALSE( pq.autoHDREligible() );
++}
++
++TEST_CASE("KMS compositing format diagnostics report component depth")
++{
++	CHECK( gamescope::drmFormatName( DRM_FORMAT_XRGB2101010 ) == "XRGB2101010" );
++	CHECK( gamescope::drmFormatBitDepth( DRM_FORMAT_XRGB2101010 ) == 10 );
++	CHECK( gamescope::drmFormatName( DRM_FORMAT_ARGB8888 ) == "ARGB8888" );
++	CHECK( gamescope::drmFormatBitDepth( DRM_FORMAT_ARGB8888 ) == 8 );
++	CHECK( gamescope::drmFormatName( DRM_FORMAT_NV12 ) == "unknown" );
++	CHECK( gamescope::drmFormatBitDepth( DRM_FORMAT_NV12 ) == 0 );
++}
+-- 
+2.51.0.windows.2
+

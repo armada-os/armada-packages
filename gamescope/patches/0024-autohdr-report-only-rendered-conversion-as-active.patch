@@ -1,0 +1,213 @@
+From a1106e8eed7d57fe33f2e69eeebeb6de8a29b44b Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Sat, 25 Jul 2026 16:54:43 -0400
+Subject: [PATCH] autohdr: report only rendered conversion as active
+
+---
+ src/AutoHDRRootProperties.h             |  8 ++++++
+ src/rendervulkan.cpp                    | 34 ++++++++++++++++++++-----
+ src/rendervulkan.hpp                    |  2 +-
+ src/steamcompmgr.cpp                    |  7 ++++-
+ src/steamcompmgr.hpp                    |  1 +
+ tests/test_auto_hdr_root_properties.cpp |  5 ++++
+ 6 files changed, 48 insertions(+), 9 deletions(-)
+
+diff --git a/src/AutoHDRRootProperties.h b/src/AutoHDRRootProperties.h
+index c61a84c5..5ec2e337 100644
+--- a/src/AutoHDRRootProperties.h
++++ b/src/AutoHDRRootProperties.h
+@@ -87,6 +87,14 @@ namespace gamescope::autohdr
+ 		return layerMask != 0u;
+ 	}
+ 
++	constexpr bool renderedActive(
++		uint32_t layerMask,
++		bool finalPipelineUsedAutoHDR )
++	{
++		return activeFromLayerMask( layerMask ) &&
++			finalPipelineUsedAutoHDR;
++	}
++
+ 	constexpr bool presentationWantsHDR( bool nativeHDR, bool autoHDRActive )
+ 	{
+ 		return nativeHDR || autoHDRActive;
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 96eff370..2b2d954c 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1297,10 +1297,12 @@ void CVulkanDevice::compileAllPipelines()
+ 
+ extern bool g_bSteamIsActiveWindow;
+ 
+-VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation, bool auto_hdr_adaptive, bool *used_requested_auto_hdr)
++VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation, bool auto_hdr_adaptive, bool *used_requested_auto_hdr, bool *used_auto_hdr)
+ {
+ 	if ( used_requested_auto_hdr )
+ 		*used_requested_auto_hdr = true;
++	if ( used_auto_hdr )
++		*used_auto_hdr = auto_hdr_layer_mask != 0u;
+ 	uint32_t effective_debug = g_uCompositeDebug;
+ 	if ( g_bSteamIsActiveWindow )
+ 		effective_debug &= ~(CompositeDebugFlag::Heatmap | CompositeDebugFlag::Heatmap_MSWCG | CompositeDebugFlag::Heatmap_Hard);
+@@ -1356,8 +1358,13 @@ VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_
+ 		fallbackKey.autoHDRLayerMask = 0;
+ 		fallbackKey.autoHDRAdaptive = 0;
+ 		auto fallback = m_pipelineMap.find( fallbackKey );
+-		if ( fallback != m_pipelineMap.end() && used_requested_auto_hdr )
+-			*used_requested_auto_hdr = false;
++		if ( fallback != m_pipelineMap.end() )
++		{
++			if ( used_requested_auto_hdr )
++				*used_requested_auto_hdr = false;
++			if ( used_auto_hdr )
++				*used_auto_hdr = false;
++		}
+ 		return fallback != m_pipelineMap.end() ? fallback->second : VK_NULL_HANDLE;
+ 	}
+ 
+@@ -1421,6 +1428,8 @@ VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_
+ 	{
+ 		if ( used_requested_auto_hdr )
+ 			*used_requested_auto_hdr = false;
++		if ( used_auto_hdr )
++			*used_auto_hdr = false;
+ 		return fallback->second;
+ 	}
+ 	if ( m_pipelineFailures.contains( fallbackKey ) )
+@@ -1436,6 +1445,8 @@ VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_
+ 	m_pipelineMap.emplace( fallbackKey, result );
+ 	if ( used_requested_auto_hdr )
+ 		*used_requested_auto_hdr = false;
++	if ( used_auto_hdr )
++		*used_auto_hdr = false;
+ 	return result;
+ }
+ 
+@@ -4721,6 +4732,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 	gamescope::Rc<CVulkanTexture> adaptiveStateForFrame;
+ 	bool adaptiveAnalysisDispatched = false;
+ 	bool finalPipelineUsedRequestedAutoHDR = true;
++	bool finalPipelineUsedAutoHDR = frameInfo->autoHDRLayerMask != 0u;
+ 	const gamescope::autohdr::AnalysisGrid adaptiveGrid =
+ 		gamescope::autohdr::sceneAnalysisGrid(
+ 			currentOutputWidth, currentOutputHeight );
+@@ -4876,7 +4888,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 
+ 		cmdBuffer->dispatch(div_roundup(tempX, pixelsPerGroup), div_roundup(tempY, pixelsPerGroup));
+ 
+-		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR, &finalPipelineUsedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		cmdBuffer->bindTexture(0, g_output.tmpOutput);
+@@ -4928,7 +4940,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		nisFrameInfo.layers[0].scale.x = 1.0f;
+ 		nisFrameInfo.layers[0].scale.y = 1.0f;
+ 
+-		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, nisFrameInfo.autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
++		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, nisFrameInfo.autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR, &finalPipelineUsedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), &nisFrameInfo);
+ 		if ( adaptiveAnalysisDispatched )
+@@ -4971,7 +4983,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		bool useSrgbView = frameInfo->layers[0].colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
+ 
+ 		type = frameInfo->blurLayer0 == BLUR_MODE_COND ? SHADER_TYPE_BLUR_COND : SHADER_TYPE_BLUR;
+-		if ( !cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR, &finalPipelineUsedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		if ( adaptiveAnalysisDispatched )
+@@ -4987,7 +4999,7 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 	}
+ 	else
+ 	{
+-		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR )) )
++		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation, adaptiveAnalysisDispatched, &finalPipelineUsedRequestedAutoHDR, &finalPipelineUsedAutoHDR )) )
+ 			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		if ( adaptiveAnalysisDispatched )
+@@ -5138,6 +5150,14 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		s_autoHDRAdaptiveRuntime.resetTracking();
+ 	}
+ 
++	if ( purpose == VulkanCompositePurpose::Presentation )
++	{
++		steamcompmgr_set_auto_hdr_rendered(
++			gamescope::autohdr::renderedActive(
++				frameInfo->autoHDRLayerMask,
++				finalPipelineUsedAutoHDR ) );
++	}
++
+ 	if ( !GetBackend()->UsesVulkanSwapchain() && pOutputOverride == nullptr && increment )
+ 	{
+ 		g_output.nOutImage = ( g_output.nOutImage + 1 ) % 3;
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+index b603dc37..295ffb12 100644
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -815,7 +815,7 @@ public:
+ 	bool BInit(VkInstance instance, VkSurfaceKHR surface);
+ 
+ 	VkSampler sampler(SamplerState key);
+-	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, uint32_t auto_hdr_layer_mask = 0, uint32_t rotation = 0, bool auto_hdr_adaptive = false, bool *used_requested_auto_hdr = nullptr);
++	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, uint32_t auto_hdr_layer_mask = 0, uint32_t rotation = 0, bool auto_hdr_adaptive = false, bool *used_requested_auto_hdr = nullptr, bool *used_auto_hdr = nullptr);
+ 	int32_t findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits );
+ 	std::unique_ptr<CVulkanCmdBuffer> commandBuffer();
+ 	uint64_t submit( std::unique_ptr<CVulkanCmdBuffer> cmdBuf);
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index b29d6fd6..c89bbc2a 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -2597,6 +2597,11 @@ gamescope::ConVar<bool> cv_paint_external_overlay_plane{ "paint_external_overlay
+ gamescope::ConVar<bool> cv_paint_cursor_plane{ "paint_cursor_plane", true };
+ gamescope::ConVar<bool> cv_paint_mura_plane{ "paint_mura_plane", true };
+ 
++void steamcompmgr_set_auto_hdr_rendered( bool active )
++{
++	g_bAutoHDRActive = active;
++}
++
+ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendConnector *connector, steamcompmgr_win_t *baseWindow, bool colorManagementUsable )
+ {
+ 	gamescope::autohdr::PolicyInput input;
+@@ -2652,7 +2657,7 @@ static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendC
+ 	frameInfo->autoHDRContentSerial = g_uCurrentBasePlaneCommitID;
+ 	frameInfo->autoHDROutputKey = connector ? connector->GetConnectorID() : 0;
+ 	frameInfo->autoHDRCalibrationSerial = g_ColorMgmt.serial;
+-	g_bAutoHDRActive = gamescope::autohdr::activeFromLayerMask( result.layerMask );
++	g_bAutoHDRActive = false;
+ 
+ 	static bool logged = false;
+ 	static gamescope::autohdr::PolicyResult previous;
+diff --git a/src/steamcompmgr.hpp b/src/steamcompmgr.hpp
+index 6734c15a..bcda4d49 100644
+--- a/src/steamcompmgr.hpp
++++ b/src/steamcompmgr.hpp
+@@ -135,6 +135,7 @@ extern uint64_t g_lastWinSeq;
+ 
+ void nudge_steamcompmgr( void );
+ void force_repaint( void );
++void steamcompmgr_set_auto_hdr_rendered( bool active );
+ 
+ extern void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uint64_t latency_ns );
+ struct wlr_surface *steamcompmgr_get_server_input_surface( size_t idx );
+diff --git a/tests/test_auto_hdr_root_properties.cpp b/tests/test_auto_hdr_root_properties.cpp
+index f8b88208..12f50d2f 100644
+--- a/tests/test_auto_hdr_root_properties.cpp
++++ b/tests/test_auto_hdr_root_properties.cpp
+@@ -105,6 +105,11 @@ int main()
+ 	check( !activeFromLayerMask( 0u ), "zero effective layer mask is inactive" );
+ 	check( activeFromLayerMask( 0x00000001u ), "first effective layer is active" );
+ 	check( activeFromLayerMask( 0x80000000u ), "highest effective layer is active" );
++	check( !renderedActive( 0u, false ), "zero-mask fallback is inactive" );
++	check( !renderedActive( 0x1u, false ),
++		"policy mask without an Auto HDR pipeline is inactive" );
++	check( renderedActive( 0x1u, true ),
++		"rendered Auto HDR pipeline is active" );
+ 
+ 	check( !presentationWantsHDR( false, false ), "SDR presentation has no HDR badge" );
+ 	check( presentationWantsHDR( true, false ), "native HDR presentation has HDR badge" );
+-- 
+2.51.0.windows.2
+

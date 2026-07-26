@@ -1,0 +1,1954 @@
+diff --git a/src/AutoHDRColor.cpp b/src/AutoHDRColor.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..832ec72992750c2cbddd60d58f1d307cb5df37f9
+--- /dev/null
++++ b/src/AutoHDRColor.cpp
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRColor.h"
++
++#include <algorithm>
++#include <cmath>
++
++namespace gamescope::autohdr
++{
++	namespace
++	{
++		constexpr double kScRGBLightScale = 80.0;
++		constexpr double kBT2020R = 0.262698338956556;
++		constexpr double kBT2020G = 0.678008765772817;
++		constexpr double kBT2020B = 0.0592928952706273;
++		double finiteNonNegative( double value )
++		{
++			return std::isfinite( value ) ? std::max( value, 0.0 ) : 0.0;
++		}
++
++		double bounded( double value, double upper )
++		{
++			return std::clamp( finiteNonNegative( value ), 0.0, upper );
++		}
++
++		RGB bounded( const RGB &value, double upper )
++		{
++			return {
++				bounded( value.r, upper ),
++				bounded( value.g, upper ),
++				bounded( value.b, upper ),
++			};
++		}
++
++		bool finite( const RGB &value )
++		{
++			return std::isfinite( value.r ) && std::isfinite( value.g ) && std::isfinite( value.b );
++		}
++	}
++
++	bool validConfig( const Config &config )
++	{
++		return std::isfinite( config.sdrNits ) &&
++			std::isfinite( config.targetNits ) &&
++			config.sdrNits > 0.0 &&
++			config.targetNits >= config.sdrNits &&
++			config.targetNits <= 10000.0;
++	}
++
++	double srgbDecode( double encoded )
++	{
++		// IEC 61966-2-1 sRGB electro-optical transfer function.
++		encoded = bounded( encoded, 1.0 );
++		return encoded <= 0.04045
++			? encoded / 12.92
++			: std::pow( ( encoded + 0.055 ) / 1.055, 2.4 );
++	}
++
++	RGB srgbDecode( const RGB &encoded )
++	{
++		return { srgbDecode( encoded.r ), srgbDecode( encoded.g ), srgbDecode( encoded.b ) };
++	}
++
++	RGB rec709ToRec2020( const RGB &linearRec709 )
++	{
++		// Linear-light BT.709 to BT.2020, derived from the standard primaries
++		// with their shared D65 white point.
++		const RGB input = bounded( linearRec709, 1.0 );
++		return {
++			0.627403895934699 * input.r + 0.329283038377883 * input.g + 0.043313065687418 * input.b,
++			0.069097289358232 * input.r + 0.919540395075459 * input.g + 0.011362315566309 * input.b,
++			0.016391438875150 * input.r + 0.088013307877226 * input.g + 0.895595253247624 * input.b,
++		};
++	}
++
++	double pqEncodeNits( double nits )
++	{
++		// SMPTE ST 2084 perceptual quantizer, absolute luminance in cd/m2.
++		constexpr double c1 = 0.8359375;
++		constexpr double c2 = 18.8515625;
++		constexpr double c3 = 18.6875;
++		constexpr double m1 = 0.1593017578125;
++		constexpr double m2 = 78.84375;
++
++		const double normalized = bounded( nits, 10000.0 ) / 10000.0;
++		const double powered = std::pow( normalized, m1 );
++		return std::pow( ( c1 + c2 * powered ) / ( 1.0 + c3 * powered ), m2 );
++	}
++
++	double pqDecodeNits( double pq )
++	{
++		// SMPTE ST 2084 inverse EOTF, returning absolute cd/m2.
++		constexpr double c1 = 0.8359375;
++		constexpr double c2 = 18.8515625;
++		constexpr double c3 = 18.6875;
++		constexpr double inverseM1 = 1.0 / 0.1593017578125;
++		constexpr double inverseM2 = 1.0 / 78.84375;
++
++		pq = bounded( pq, 1.0 );
++		const double powered = std::pow( pq, inverseM2 );
++		const double numerator = std::max( powered - c1, 0.0 );
++		const double denominator = c2 - c3 * powered;
++		if ( denominator <= 0.0 )
++			return 10000.0;
++		return bounded( 10000.0 * std::pow( numerator / denominator, inverseM1 ), 10000.0 );
++	}
++
++	double nitsToScRGB( double nits )
++	{
++		return bounded( nits, 10000.0 ) / kScRGBLightScale;
++	}
++
++	double scRGBToNits( double scRGB )
++	{
++		return bounded( scRGB, 10000.0 / kScRGBLightScale ) * kScRGBLightScale;
++	}
++
++	std::optional<RGB> efficientInverseToneMap( const RGB &linearRec2020, const Config &config )
++	{
++		// Conservative global highlight expansion following the design guidance
++		// in Rep. ITU-R BT.2446-1 section 5.1: preserve display-light shadows and
++		// mid-tones, begin expansion near 60% linear luminance, and limit the
++		// highlight multiplier to 2.3. The quadratic blend is independently
++		// derived so its value and first derivative match the unexpanded segment
++		// at the knee.
++		if ( !validConfig( config ) )
++			return std::nullopt;
++
++		const RGB color = bounded( linearRec2020, 1.0 );
++		if ( color.r == 0.0 && color.g == 0.0 && color.b == 0.0 )
++			return RGB{};
++
++		constexpr double highlightKnee = 0.60;
++		constexpr double highlightMultiplier = 2.30;
++		const double luminance = kBT2020R * color.r + kBT2020G * color.g + kBT2020B * color.b;
++		if ( luminance <= 0.0 || !std::isfinite( luminance ) )
++			return RGB{};
++
++		const double expandedWhite = config.sdrNits *
++			( highlightKnee + highlightMultiplier * ( 1.0 - highlightKnee ) );
++		const double mappedWhite = std::min( config.targetNits, expandedWhite );
++		double mappedLuminance = config.sdrNits * luminance;
++		if ( luminance > highlightKnee && mappedWhite > config.sdrNits )
++		{
++			const double t = ( luminance - highlightKnee ) / ( 1.0 - highlightKnee );
++			mappedLuminance += ( mappedWhite - config.sdrNits ) * t * t;
++		}
++
++		const double scale = mappedLuminance / luminance;
++		RGB mapped = { color.r * scale, color.g * scale, color.b * scale };
++		const double maxChannel = std::max( { mapped.r, mapped.g, mapped.b } );
++		if ( maxChannel > config.targetNits )
++		{
++			const double peakScale = config.targetNits / maxChannel;
++			mapped = { mapped.r * peakScale, mapped.g * peakScale, mapped.b * peakScale };
++		}
++
++		return finite( mapped ) ? std::optional<RGB>{ bounded( mapped, config.targetNits ) } : std::nullopt;
++	}
++
++	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedRec709, const Config &config )
++	{
++		const RGB decoded = srgbDecode( { encodedRec709.r, encodedRec709.g, encodedRec709.b } );
++		const auto mapped = efficientInverseToneMap( rec709ToRec2020( decoded ), config );
++		if ( !mapped )
++			return std::nullopt;
++		return RGBA{ mapped->r, mapped->g, mapped->b, encodedRec709.a };
++	}
++}
+diff --git a/src/AutoHDRColor.h b/src/AutoHDRColor.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..ad80b9b756a7229c2d3057a40be9a63d685aa261
+--- /dev/null
++++ b/src/AutoHDRColor.h
+@@ -0,0 +1,43 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#pragma once
++
++#include <optional>
++
++namespace gamescope::autohdr
++{
++	struct RGB
++	{
++		double r;
++		double g;
++		double b;
++	};
++
++	struct RGBA
++	{
++		double r;
++		double g;
++		double b;
++		double a;
++	};
++
++	struct Config
++	{
++		double sdrNits;
++		double targetNits;
++	};
++
++	bool validConfig( const Config &config );
++
++	double srgbDecode( double encoded );
++	RGB srgbDecode( const RGB &encoded );
++	RGB rec709ToRec2020( const RGB &linearRec709 );
++
++	double pqEncodeNits( double nits );
++	double pqDecodeNits( double pq );
++	double nitsToScRGB( double nits );
++	double scRGBToNits( double scRGB );
++
++	std::optional<RGB> efficientInverseToneMap( const RGB &linearRec2020, const Config &config );
++	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedRec709, const Config &config );
++}
+diff --git a/src/AutoHDRPolicy.cpp b/src/AutoHDRPolicy.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..adbba2a643fcfcf3810146e1325737c7c92b3514
+--- /dev/null
++++ b/src/AutoHDRPolicy.cpp
+@@ -0,0 +1,84 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRPolicy.h"
++
++#include <bit>
++
++namespace gamescope::autohdr
++{
++	namespace
++	{
++		bool isFinite( double value )
++		{
++			constexpr uint64_t exponentMask = UINT64_C( 0x7ff0000000000000 );
++			return ( std::bit_cast<uint64_t>( value ) & exponentMask ) != exponentMask;
++		}
++
++		bool validConfiguration( const PolicyInput &input )
++		{
++			return isFinite( input.sdrReferenceNits ) &&
++				isFinite( input.targetNits ) &&
++				isFinite( input.calibratedOutputPeakNits ) &&
++				input.sdrReferenceNits > 0.0 &&
++				input.targetNits >= input.sdrReferenceNits &&
++				input.calibratedOutputPeakNits > 0.0 &&
++				input.targetNits <= input.calibratedOutputPeakNits;
++		}
++
++		bool isExplicitSDR( GamescopeAppTextureColorspace colorspace )
++		{
++			return colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR ||
++				colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB;
++		}
++	}
++
++	std::string_view policyReasonName( PolicyReason reason ) noexcept
++	{
++		switch ( reason )
++		{
++			case PolicyReason::Enabled: return "enabled";
++			case PolicyReason::RequestDisabled: return "request-disabled";
++			case PolicyReason::HDROutputInactive: return "hdr-output-inactive";
++			case PolicyReason::OutputUnqualified: return "output-unqualified";
++			case PolicyReason::CalibrationUnavailable: return "calibration-unavailable";
++			case PolicyReason::ColorManagementNotReady: return "color-management-not-ready";
++			case PolicyReason::SteamOrSystemUIFocused: return "steam-or-system-ui-focused";
++			case PolicyReason::InvalidLayerCount: return "invalid-layer-count";
++			case PolicyReason::InvalidConfiguration: return "invalid-configuration";
++			case PolicyReason::NoEligibleLayers: return "no-eligible-layers";
++		}
++		return "unknown";
++	}
++
++	PolicyResult evaluatePolicy( const PolicyInput &input )
++	{
++		if ( !input.requested )
++			return { 0, PolicyReason::RequestDisabled };
++		if ( !input.hdrOutputActive )
++			return { 0, PolicyReason::HDROutputInactive };
++		if ( !input.outputQualified )
++			return { 0, PolicyReason::OutputUnqualified };
++		if ( !input.calibrationAvailable )
++			return { 0, PolicyReason::CalibrationUnavailable };
++		if ( !input.colorManagementReady )
++			return { 0, PolicyReason::ColorManagementNotReady };
++		if ( input.steamOrSystemUIFocused )
++			return { 0, PolicyReason::SteamOrSystemUIFocused };
++		if ( input.activeLayerCount == 0 || input.activeLayerCount > MaxPolicyLayers )
++			return { 0, PolicyReason::InvalidLayerCount };
++		if ( !validConfiguration( input ) )
++			return { 0, PolicyReason::InvalidConfiguration };
++
++		uint32_t mask = 0;
++		for ( uint32_t layer = 0; layer < input.activeLayerCount; layer++ )
++		{
++			const LayerState &state = input.layers[layer];
++			if ( state.sceneCandidate && isExplicitSDR( state.colorspace ) )
++				mask |= uint32_t{ 1 } << layer;
++		}
++
++		if ( mask == 0 )
++			return { 0, PolicyReason::NoEligibleLayers };
++		return { mask, PolicyReason::Enabled };
++	}
++}
+diff --git a/src/AutoHDRPolicy.h b/src/AutoHDRPolicy.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdab36595cfe13a60a7e32e3de706813989d3a1b
+--- /dev/null
++++ b/src/AutoHDRPolicy.h
+@@ -0,0 +1,65 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#pragma once
++
++#include "gamescope_shared.h"
++
++#include <array>
++#include <cstdint>
++#include <string_view>
++
++namespace gamescope::autohdr
++{
++	constexpr uint32_t MaxPolicyLayers = 32;
++
++	enum class PolicyReason : uint8_t
++	{
++		Enabled = 0,
++		RequestDisabled = 1,
++		HDROutputInactive = 2,
++		OutputUnqualified = 3,
++		CalibrationUnavailable = 4,
++		ColorManagementNotReady = 5,
++		SteamOrSystemUIFocused = 6,
++		InvalidLayerCount = 7,
++		InvalidConfiguration = 8,
++		NoEligibleLayers = 9,
++	};
++
++	struct LayerState
++	{
++		bool sceneCandidate = false;
++		GamescopeAppTextureColorspace colorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU;
++	};
++
++	struct PolicyInput
++	{
++		bool requested = false;
++		bool hdrOutputActive = false;
++		bool outputQualified = false;
++		bool calibrationAvailable = false;
++		bool colorManagementReady = false;
++		bool steamOrSystemUIFocused = false;
++
++		double sdrReferenceNits = 0.0;
++		double targetNits = 0.0;
++		double calibratedOutputPeakNits = 0.0;
++
++		uint32_t activeLayerCount = 0;
++		std::array<LayerState, MaxPolicyLayers> layers = {};
++	};
++
++	struct PolicyResult
++	{
++		uint32_t layerMask = 0;
++		PolicyReason reason = PolicyReason::RequestDisabled;
++
++		constexpr bool requiresComposition() const
++		{
++			return layerMask != 0;
++		}
++	};
++
++	std::string_view policyReasonName( PolicyReason reason ) noexcept;
++	PolicyResult evaluatePolicy( const PolicyInput &input );
++}
+diff --git a/src/AutoHDRRootProperties.h b/src/AutoHDRRootProperties.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..2006df0cf3b5a75351899f3473249ffb6d78287f
+--- /dev/null
++++ b/src/AutoHDRRootProperties.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#pragma once
++
++#include <cstdint>
++#include <string_view>
++
++namespace gamescope::autohdr
++{
++	inline constexpr std::string_view SupportedAtomName = "GAMESCOPE_HDR_ITM_SUPPORTED";
++	inline constexpr std::string_view EnableAtomName = "GAMESCOPE_HDR_ITM_ENABLE";
++	inline constexpr std::string_view ActiveFeedbackAtomName = "GAMESCOPE_AUTO_HDR_ACTIVE_FEEDBACK";
++
++	struct RootPropertyValues
++	{
++		uint32_t supported;
++		uint32_t enabled;
++		uint32_t active;
++	};
++
++	constexpr RootPropertyValues initialRootPropertyValues( bool enabled )
++	{
++		return { 1u, enabled ? 1u : 0u, 0u };
++	}
++
++	constexpr bool activeFromLayerMask( uint32_t layerMask )
++	{
++		return layerMask != 0u;
++	}
++
++	constexpr bool presentationWantsHDR( bool nativeHDR, bool autoHDRActive )
++	{
++		return nativeHDR || autoHDRActive;
++	}
++}
+diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
+index 1ea53a6d9c81bd3ad67511461346fe1e0231fecc..7ee88f4243e3154d002006c09a9616e17697184f 100644
+--- a/src/Backends/DRMBackend.cpp
++++ b/src/Backends/DRMBackend.cpp
+@@ -3718,10 +3718,10 @@ namespace gamescope
+ 			bNeedsFullComposite |= g_bColorSliderInUse;
+ 			bNeedsFullComposite |= pFrameInfo->bFadingOut;
+ 			bNeedsFullComposite |= !g_reshade_effect.empty();
++			bNeedsFullComposite |= pFrameInfo->autoHDRLayerMask != 0;
+ 
+ 			if ( g_bOutputHDREnabled )
+ 			{
+-				bNeedsFullComposite |= g_bHDRItmEnable;
+ 				const bool bSupportsHardwareColorManagement = SupportsColorManagement();
+ 				bNeedsFullComposite |= DrmHdrOutputRequiresVulkanComposition(
+ 					g_bOutputHDREnabled,
+diff --git a/src/Backends/OpenVRBackend.cpp b/src/Backends/OpenVRBackend.cpp
+index efdc779ce2b368fd6717ed4e77f53b72317c6eba..44740c43b0fe6e7294c68f143e9179b2e72fe450 100644
+--- a/src/Backends/OpenVRBackend.cpp
++++ b/src/Backends/OpenVRBackend.cpp
+@@ -1627,9 +1627,7 @@ namespace gamescope
+         bNeedsFullComposite |= pFrameInfo->bFadingOut;
+         bNeedsFullComposite |= !g_reshade_effect.empty();
+         bNeedsFullComposite |= !m_pBackend->UsesModifiers();
+-
+-        if ( g_bOutputHDREnabled )
+-            bNeedsFullComposite |= g_bHDRItmEnable;
++        bNeedsFullComposite |= pFrameInfo->autoHDRLayerMask != 0;
+ 
+         if ( !m_pBackend->SupportsColorManagement() )
+             bNeedsFullComposite |= ColorspaceIsHDR( pFrameInfo->layers[0].colorspace );
+diff --git a/src/Backends/WaylandBackend.cpp b/src/Backends/WaylandBackend.cpp
+index abdf7820b0f4def71815614c9d2d782a3582d19c..f06ab1b44679fb2f837368a4d08f720138f3b6a3 100644
+--- a/src/Backends/WaylandBackend.cpp
++++ b/src/Backends/WaylandBackend.cpp
+@@ -1068,9 +1068,7 @@ namespace gamescope
+             bNeedsFullComposite |= g_bColorSliderInUse;
+             bNeedsFullComposite |= pFrameInfo->bFadingOut;
+             bNeedsFullComposite |= !g_reshade_effect.empty();
+-
+-            if ( g_bOutputHDREnabled )
+-                bNeedsFullComposite |= g_bHDRItmEnable;
++            bNeedsFullComposite |= pFrameInfo->autoHDRLayerMask != 0;
+ 
+             if ( !m_pBackend->SupportsColorManagement() )
+                 bNeedsFullComposite |= ColorspaceIsHDR( pFrameInfo->layers[0].colorspace );
+diff --git a/src/mangoapp.cpp b/src/mangoapp.cpp
+index 16e1feb0990741315c0c50fc311f6ec4c24e2930..83bdbfbc5bd054e6b0a76a5a1f8b0e4b7cd39b9a 100644
+--- a/src/mangoapp.cpp
++++ b/src/mangoapp.cpp
+@@ -4,12 +4,14 @@
+ #include <cstring>
+ 
+ #include "steamcompmgr.hpp"
++#include "AutoHDRRootProperties.h"
+ #include "refresh_rate.h"
+ #include "main.hpp"
+ 
+ static bool inited = false;
+ static int msgid = 0;
+ extern bool g_bAppWantsHDRCached;
++extern bool g_bAutoHDRActiveCached;
+ extern uint32_t g_focusedBaseAppId;
+ 
+ struct mangoapp_msg_header {
+@@ -59,7 +61,8 @@ void mangoapp_update( uint64_t visible_frametime, uint64_t app_frametime_ns, uin
+     mangoapp_msg_v1.outputWidth = g_nOutputWidth;
+     mangoapp_msg_v1.outputHeight = g_nOutputHeight;
+     mangoapp_msg_v1.displayRefresh = (uint16_t) gamescope::ConvertmHzToHz( g_nOutputRefresh );
+-    mangoapp_msg_v1.bAppWantsHDR = g_bAppWantsHDRCached;
++    mangoapp_msg_v1.bAppWantsHDR = gamescope::autohdr::presentationWantsHDR(
++        g_bAppWantsHDRCached, g_bAutoHDRActiveCached );
+     mangoapp_msg_v1.bSteamFocused = g_focusedBaseAppId == 769;
+     memset(mangoapp_msg_v1.engineName, 0, sizeof(mangoapp_msg_v1.engineName));
+     std::shared_ptr<std::string> engine = focusWindow_engine;
+diff --git a/src/meson.build b/src/meson.build
+index 806fe5d1e609c2476ea59568f34c9e433be94331..b292c6eb1e6bd29a7a0c468e1a6c349e64e04c97 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -103,6 +103,7 @@ src = [
+   'Utils/Process.cpp',
+   'Script/Script.cpp',
+   'BufferMemo.cpp',
++  'AutoHDRPolicy.cpp',
+   'steamcompmgr.cpp',
+   'convar.cpp',
+   'convar_script.cpp',
+diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
+index 8049efa784264c5d867515349506739de1d55317..c72c709c62f546f46e326b0071b963a20c6b861f 100644
+--- a/src/rendervulkan.cpp
++++ b/src/rendervulkan.cpp
+@@ -1095,7 +1095,7 @@ VkSampler CVulkanDevice::sampler( SamplerState key )
+ 	return ret;
+ }
+ 
+-VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable, uint32_t rotation)
++VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation)
+ {
+ 	const std::array<VkSpecializationMapEntry, 8> specializationEntries = {{
+ 		{
+@@ -1150,7 +1150,7 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
+ 		uint32_t blur_layer_count;
+ 		uint32_t colorspace_mask;
+ 		uint32_t output_eotf;
+-		uint32_t itm_enable;
++		uint32_t auto_hdr_layer_mask;
+ 		uint32_t rotation;
+ 	} specializationData = {
+ 		.layerCount   = layerCount,
+@@ -1159,7 +1159,7 @@ VkPipeline CVulkanDevice::compilePipeline(uint32_t layerCount, uint32_t ycbcrMas
+ 		.blur_layer_count = blur_layer_count,
+ 		.colorspace_mask = colorspace_mask,
+ 		.output_eotf = output_eotf,
+-		.itm_enable = itm_enable,
++		.auto_hdr_layer_mask = auto_hdr_layer_mask,
+ 		.rotation = rotation,
+ 	};
+ 
+@@ -1198,7 +1198,7 @@ void CVulkanDevice::compileAllPipelines()
+ 	pthread_setname_np( pthread_self(), "gamescope-shdr" );
+ 
+ 	std::array<PipelineInfo_t, SHADER_TYPE_COUNT> pipelineInfos;
+-#define SHADER(type, layer_count, max_ycbcr, blur_layers, need_rotations) pipelineInfos[SHADER_TYPE_##type] = {SHADER_TYPE_##type, layer_count, max_ycbcr, blur_layers, 0, 0, 0, false, (need_rotations) && g_bRotationShaderRequested ? 3u : 0u}
++#define SHADER(type, layer_count, max_ycbcr, blur_layers, need_rotations) pipelineInfos[SHADER_TYPE_##type] = {SHADER_TYPE_##type, layer_count, max_ycbcr, blur_layers, 0, 0, 0, 0, (need_rotations) && g_bRotationShaderRequested ? 3u : 0u}
+ 	SHADER(BLIT, k_nMaxLayers, k_nMaxYcbcrMask_ToPreCompile, 1, true);
+ 	SHADER(BLUR, k_nMaxLayers, k_nMaxYcbcrMask_ToPreCompile, k_nMaxBlurLayers, true);
+ 	SHADER(BLUR_COND, k_nMaxLayers, k_nMaxYcbcrMask_ToPreCompile, k_nMaxBlurLayers, true);
+@@ -1219,10 +1219,12 @@ void CVulkanDevice::compileAllPipelines()
+ 						if (blur_layers > layerCount)
+ 							continue;
+ 
+-						VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.itmEnable, rotation);
++						VkPipeline newPipeline = compilePipeline(layerCount, ycbcrMask, info.shaderType, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.autoHDRLayerMask, rotation);
++						if ( newPipeline == VK_NULL_HANDLE )
++							continue;
+ 						{
+ 							std::lock_guard<std::mutex> lock(m_pipelineMutex);
+-							PipelineInfo_t key = {info.shaderType, layerCount, ycbcrMask, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.itmEnable, rotation};
++							PipelineInfo_t key = {info.shaderType, layerCount, ycbcrMask, blur_layers, info.compositeDebug, info.colorspaceMask, info.outputEOTF, info.autoHDRLayerMask, rotation};
+ 							auto result = m_pipelineMap.emplace(std::make_pair(key, newPipeline));
+ 							if (!result.second)
+ 								vk.DestroyPipeline(device(), newPipeline, nullptr);
+@@ -1236,25 +1238,61 @@ void CVulkanDevice::compileAllPipelines()
+ 
+ extern bool g_bSteamIsActiveWindow;
+ 
+-VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable, uint32_t rotation)
++VkPipeline CVulkanDevice::pipeline(ShaderType type, uint32_t layerCount, uint32_t ycbcrMask, uint32_t blur_layers, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation)
+ {
+ 	uint32_t effective_debug = g_uCompositeDebug;
+ 	if ( g_bSteamIsActiveWindow )
+ 		effective_debug &= ~(CompositeDebugFlag::Heatmap | CompositeDebugFlag::Heatmap_MSWCG | CompositeDebugFlag::Heatmap_Hard);
+ 
+ 	std::lock_guard<std::mutex> lock(m_pipelineMutex);
+-	PipelineInfo_t key = {type, layerCount, ycbcrMask, blur_layers, effective_debug, colorspace_mask, output_eotf, itm_enable, rotation};
++	PipelineInfo_t key = {type, layerCount, ycbcrMask, blur_layers, effective_debug, colorspace_mask, output_eotf, auto_hdr_layer_mask, rotation};
+ 	auto search = m_pipelineMap.find(key);
+-	if (search == m_pipelineMap.end())
++	if (search != m_pipelineMap.end())
++		return search->second;
++
++	if ( m_pipelineFailures.contains( key ) )
++	{
++		if ( auto_hdr_layer_mask == 0 )
++			return VK_NULL_HANDLE;
++
++		PipelineInfo_t fallbackKey = key;
++		fallbackKey.autoHDRLayerMask = 0;
++		auto fallback = m_pipelineMap.find( fallbackKey );
++		return fallback != m_pipelineMap.end() ? fallback->second : VK_NULL_HANDLE;
++	}
++
++	VkPipeline result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, auto_hdr_layer_mask, rotation);
++	if ( result != VK_NULL_HANDLE )
+ 	{
+-		VkPipeline result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, itm_enable, rotation);
+-		m_pipelineMap[key] = result;
++		m_pipelineMap.emplace( key, result );
+ 		return result;
+ 	}
+-	else
++
++	m_pipelineFailures.emplace( key );
++	if ( auto_hdr_layer_mask == 0 )
+ 	{
+-		return search->second;
++		vk_log.errorf( "zero-mask compute pipeline unavailable; composition aborted" );
++		return VK_NULL_HANDLE;
++	}
++
++	vk_log.errorf( "Auto HDR mask 0x%08x pipeline unavailable; using zero-mask fallback", auto_hdr_layer_mask );
++	PipelineInfo_t fallbackKey = key;
++	fallbackKey.autoHDRLayerMask = 0;
++	auto fallback = m_pipelineMap.find( fallbackKey );
++	if ( fallback != m_pipelineMap.end() )
++		return fallback->second;
++	if ( m_pipelineFailures.contains( fallbackKey ) )
++		return VK_NULL_HANDLE;
++
++	result = compilePipeline(layerCount, ycbcrMask, type, blur_layers, effective_debug, colorspace_mask, output_eotf, 0, rotation);
++	if ( result == VK_NULL_HANDLE )
++	{
++		m_pipelineFailures.emplace( fallbackKey );
++		vk_log.errorf( "Auto HDR zero-mask fallback pipeline unavailable; composition aborted" );
++		return VK_NULL_HANDLE;
+ 	}
++	m_pipelineMap.emplace( fallbackKey, result );
++	return result;
+ }
+ 
+ 
+@@ -1646,9 +1684,12 @@ void CVulkanCmdBuffer::uploadConstants(Args&&... args)
+ 	memcpy(ptr, &data, sizeof(data));
+ }
+ 
+-void CVulkanCmdBuffer::bindPipeline(VkPipeline pipeline)
++bool CVulkanCmdBuffer::bindPipeline(VkPipeline pipeline)
+ {
++	if ( pipeline == VK_NULL_HANDLE )
++		return false;
+ 	m_device->vk.CmdBindPipeline(m_cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
++	return true;
+ }
+ 
+ void CVulkanCmdBuffer::dispatch(uint32_t x, uint32_t y, uint32_t z)
+@@ -3988,7 +4029,8 @@ std::optional<uint64_t> vulkan_screenshot( const struct FrameInfo_t *frameInfo,
+ 	for (uint32_t i = 0; i < EOTF_Count; i++)
+ 		cmdBuffer->bindColorMgmtLuts(i, frameInfo->shaperLut[i], frameInfo->lut3D[i]);
+ 
+-	cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF ));
++	if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, 0 ) ) )
++		return std::nullopt;
+ 	bind_all_layers(cmdBuffer.get(), frameInfo);
+ 	cmdBuffer->bindTarget(pScreenshotTexture);
+ 	cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo);
+@@ -4009,7 +4051,8 @@ std::optional<uint64_t> vulkan_screenshot( const struct FrameInfo_t *frameInfo,
+ 		for (uint32_t i = 0; i < EOTF_Count; i++)
+ 			cmdBuffer->bindColorMgmtLuts(i, nullptr, nullptr);
+ 
+-		cmdBuffer->bindPipeline(g_device.pipeline( SHADER_TYPE_RGB_TO_NV12, 1, 0, 0, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, EOTF_Count ));
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline( SHADER_TYPE_RGB_TO_NV12, 1, 0, 0, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, EOTF_Count, 0 )) )
++			return std::nullopt;
+ 		cmdBuffer->bindTexture(0, pScreenshotTexture);
+ 		cmdBuffer->setTextureSrgb(0, true);
+ 		cmdBuffer->setSamplerNearest(0, false);
+@@ -4109,7 +4152,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 
+ 		update_tmp_images(tempX, tempY);
+ 
+-		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_EASU));
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_EASU)) )
++			return std::nullopt;
+ 		cmdBuffer->bindTarget(g_output.tmpOutput);
+ 		cmdBuffer->bindTexture(0, frameInfo->layers[0].tex);
+ 		cmdBuffer->setTextureSrgb(0, true);
+@@ -4121,7 +4165,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 
+ 		cmdBuffer->dispatch(div_roundup(tempX, pixelsPerGroup), div_roundup(tempY, pixelsPerGroup));
+ 
+-		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, false, rotation ));
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_RCAS, frameInfo->layerCount, frameInfo->ycbcrMask() & ~1, 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation )) )
++			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		cmdBuffer->bindTexture(0, g_output.tmpOutput);
+ 		cmdBuffer->setTextureSrgb(0, true);
+@@ -4144,7 +4189,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 
+ 		float nisSharpness = (20 - g_upscaleFilterSharpness) / 20.0f;
+ 
+-		cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_NIS));
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(SHADER_TYPE_NIS)) )
++			return std::nullopt;
+ 		cmdBuffer->bindTarget(g_output.tmpOutput);
+ 		cmdBuffer->bindTexture(0, frameInfo->layers[0].tex);
+ 		cmdBuffer->setTextureSrgb(0, true);
+@@ -4168,7 +4214,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		nisFrameInfo.layers[0].scale.x = 1.0f;
+ 		nisFrameInfo.layers[0].scale.y = 1.0f;
+ 
+-		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, false, rotation ));
++		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, nisFrameInfo.layerCount, nisFrameInfo.ycbcrMask(), 0u, nisFrameInfo.colorspaceMask(), outputTF, nisFrameInfo.autoHDRLayerMask, rotation )) )
++			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), &nisFrameInfo);
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->uploadConstants<BlitPushData_t>(&nisFrameInfo);
+@@ -4188,7 +4235,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		if (frameInfo->layerCount >= 2 && frameInfo->layers[1].zpos == g_zposOverride)
+ 			blur_layer_count++;
+ 
+-		cmdBuffer->bindPipeline(g_device.pipeline(type, blur_layer_count, frameInfo->ycbcrMask() & 0x3u, 0, frameInfo->colorspaceMask(), outputTF ));
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(type, blur_layer_count, frameInfo->ycbcrMask() & 0x3u, 0, frameInfo->colorspaceMask(), outputTF, 0 )) )
++			return std::nullopt;
+ 		cmdBuffer->bindTarget(g_output.tmpOutput);
+ 		for (uint32_t i = 0; i < blur_layer_count; i++)
+ 		{
+@@ -4206,7 +4254,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 		bool useSrgbView = frameInfo->layers[0].colorspace == GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR;
+ 
+ 		type = frameInfo->blurLayer0 == BLUR_MODE_COND ? SHADER_TYPE_BLUR_COND : SHADER_TYPE_BLUR;
+-		cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, false, rotation ));
++		if ( !cmdBuffer->bindPipeline(g_device.pipeline(type, frameInfo->layerCount, frameInfo->ycbcrMask(), blur_layer_count, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation )) )
++			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->bindTexture(VKR_BLUR_EXTRA_SLOT, g_output.tmpOutput);
+@@ -4218,7 +4267,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 	}
+ 	else
+ 	{
+-		cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, false, rotation ));
++		if ( !cmdBuffer->bindPipeline( g_device.pipeline(SHADER_TYPE_BLIT, frameInfo->layerCount, frameInfo->ycbcrMask(), 0u, frameInfo->colorspaceMask(), outputTF, frameInfo->autoHDRLayerMask, rotation )) )
++			return std::nullopt;
+ 		bind_all_layers(cmdBuffer.get(), frameInfo);
+ 		cmdBuffer->bindTarget(compositeImage);
+ 		cmdBuffer->uploadConstants<BlitPushData_t>(frameInfo);
+@@ -4283,7 +4333,8 @@ std::optional<uint64_t> vulkan_composite( struct FrameInfo_t *frameInfo, gamesco
+ 			for (uint32_t i = 0; i < EOTF_Count; i++)
+ 				cmdBuffer->bindColorMgmtLuts(i, nullptr, nullptr);
+ 
+-			cmdBuffer->bindPipeline(g_device.pipeline( ycbcr ? SHADER_TYPE_RGB_TO_NV12 : SHADER_TYPE_BLIT, 1, 0, 0, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, EOTF_Count, false, reverseRotation ));
++			if ( !cmdBuffer->bindPipeline(g_device.pipeline( ycbcr ? SHADER_TYPE_RGB_TO_NV12 : SHADER_TYPE_BLIT, 1, 0, 0, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB, EOTF_Count, 0, reverseRotation )) )
++				return std::nullopt;
+ 			cmdBuffer->bindTexture(0, compositeImage);
+ 			cmdBuffer->setTextureSrgb(0, true);
+ 			cmdBuffer->setSamplerNearest(0, false);
+diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
+index 6791bf6c7cbcebac9f8681521d191582cee7960e..76e29a71c8807128de1b295f20099c7dff4ba2a2 100644
+--- a/src/rendervulkan.hpp
++++ b/src/rendervulkan.hpp
+@@ -7,6 +7,7 @@
+ #include <memory>
+ #include <map>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <array>
+ #include <bitset>
+ #include <mutex>
+@@ -293,6 +294,7 @@ struct FrameInfo_t
+ 	EOTF outputEncodingEOTF;
+ 
+ 	int layerCount;
++	uint32_t autoHDRLayerMask = 0;
+ 	struct Layer_t
+ 	{
+ 		gamescope::Rc<CVulkanTexture> tex;
+@@ -314,6 +316,7 @@ struct FrameInfo_t
+ 		std::shared_ptr<gamescope::BackendBlob> hdr_metadata_blob;
+ 
+ 		GamescopeAppTextureColorspace colorspace;
++		bool autoHDRCandidate = false;
+ 
+ 		bool isYcbcr() const
+ 		{
+@@ -609,7 +612,7 @@ struct PipelineInfo_t
+ 
+ 	uint32_t colorspaceMask;
+ 	uint32_t outputEOTF;
+-	bool itmEnable;
++	uint32_t autoHDRLayerMask;
+ 
+ 	uint32_t rotation;
+ 
+@@ -622,7 +625,7 @@ struct PipelineInfo_t
+ 		compositeDebug == o.compositeDebug &&
+ 		colorspaceMask == o.colorspaceMask &&
+ 		outputEOTF == o.outputEOTF &&
+-		itmEnable == o.itmEnable &&
++		autoHDRLayerMask == o.autoHDRLayerMask &&
+ 		rotation == o.rotation;
+ 	}
+ };
+@@ -646,7 +649,7 @@ namespace std
+ 			hash = hash_combine(hash, k.compositeDebug);
+ 			hash = hash_combine(hash, k.colorspaceMask);
+ 			hash = hash_combine(hash, k.outputEOTF);
+-			hash = hash_combine(hash, k.itmEnable);
++			hash = hash_combine(hash, k.autoHDRLayerMask);
+ 			hash = hash_combine(hash, k.rotation);
+ 			return hash;
+ 		}
+@@ -776,7 +779,7 @@ public:
+ 	bool BInit(VkInstance instance, VkSurfaceKHR surface);
+ 
+ 	VkSampler sampler(SamplerState key);
+-	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, bool itm_enable = false, uint32_t rotation = 0);
++	VkPipeline pipeline(ShaderType type, uint32_t layerCount = 1, uint32_t ycbcrMask = 0, uint32_t blur_layers = 0, uint32_t colorspace_mask = 0, uint32_t output_eotf = EOTF_Gamma22, uint32_t auto_hdr_layer_mask = 0, uint32_t rotation = 0);
+ 	int32_t findMemoryType( VkMemoryPropertyFlags properties, uint32_t requiredTypeBits );
+ 	std::unique_ptr<CVulkanCmdBuffer> commandBuffer();
+ 	uint64_t submit( std::unique_ptr<CVulkanCmdBuffer> cmdBuf);
+@@ -851,7 +854,7 @@ protected:
+ 	bool createPools();
+ 	bool createShaders();
+ 	bool createScratchResources();
+-	VkPipeline compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, bool itm_enable, uint32_t rotation);
++	VkPipeline compilePipeline(uint32_t layerCount, uint32_t ycbcrMask, ShaderType type, uint32_t blur_layer_count, uint32_t composite_debug, uint32_t colorspace_mask, uint32_t output_eotf, uint32_t auto_hdr_layer_mask, uint32_t rotation);
+ 	void compileAllPipelines();
+ 
+ 	VkDevice m_device = nullptr;
+@@ -884,6 +887,7 @@ protected:
+ 	std::unordered_map< SamplerState, VkSampler > m_samplerCache;
+ 	std::array<VkShaderModule, SHADER_TYPE_COUNT> m_shaderModules;
+ 	std::unordered_map<PipelineInfo_t, VkPipeline> m_pipelineMap;
++	std::unordered_set<PipelineInfo_t> m_pipelineFailures;
+ 	std::mutex m_pipelineMutex;
+ 
+ 	static constexpr uint32_t k_uMaxConcurrentSubmits = 8;
+@@ -950,7 +954,7 @@ public:
+ 	void clearState();
+ 	template<class PushData, class... Args>
+ 	void uploadConstants(Args&&... args);
+-	void bindPipeline(VkPipeline pipeline);
++	bool bindPipeline(VkPipeline pipeline);
+ 	void dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1);
+ 	void copyImage(gamescope::Rc<CVulkanTexture> src, gamescope::Rc<CVulkanTexture> dst);
+ 	void copyBufferToImage(VkBuffer buffer, VkDeviceSize offset, uint32_t stride, gamescope::Rc<CVulkanTexture> dst);
+diff --git a/src/shaders/colorimetry.h b/src/shaders/colorimetry.h
+index 00adebf4f5d76139340e7c126a1ef31005017f33..43b9cf8c657fde1faffd095ff49174f07b6456f0 100644
+--- a/src/shaders/colorimetry.h
++++ b/src/shaders/colorimetry.h
+@@ -168,160 +168,74 @@ vec3 convert_primaries(vec3 color, mat3 src_to_xyz, mat3 xyz_to_dst) {
+     return color * mat3(src_to_xyz * xyz_to_dst);
+ }
+ 
+-// Rep. ITU-R BT.2446-1 Table 2-4 (inversed)
+-// BT.2446 Method A inverse tone mapping (itm)
+-vec3 bt2446a_inverse_tonemapping(
+-    vec3  color,
+-    float sdr_nits,
+-    float target_nits)
++vec3 finite_nonnegative(vec3 color)
+ {
+-    const vec3 k_bt2020 = vec3(0.262698338956556, 0.678008765772817, 0.0592928952706273);
+-    const float k_bt2020_r_helper = 1.47460332208689; // 2 - 2 * 0.262698338956556
+-    const float k_bt2020_b_helper = 1.88141420945875; // 2 - 2 * 0.0592928952706273
+-
+-    //gamma
+-    const float inverse_gamma = 2.4f;
+-    const float gamma = 1.f / inverse_gamma;
+-
+-    //RGB->R'G'B' gamma compression
+-    color = pow(color, vec3(gamma));
+-
+-    // Rec. ITU-R BT.2020-2 Table 4
+-    //Y'tmo
+-    const float y_tmo = dot(color, k_bt2020);
+-    //C'b,tmo
+-    const float c_b_tmo = (color.b - y_tmo) /
+-                          k_bt2020_b_helper;
+-    //C'r,tmo
+-    const float c_r_tmo = (color.r - y_tmo) /
+-                          k_bt2020_r_helper;
+-
+-    // fast path as per Rep. ITU-R BT.2446-1 Table 4
+-    // matches the output of the inversed version for the given input
+-    if ((sdr_nits > 99.f && sdr_nits < 101.f) && (target_nits > 999.f && target_nits < 1001.f))
+-    //avoid float issues
+-    {
+-        sdr_nits = 100.f;
+-        target_nits = 1000.f;
+-
+-        const float a1 =  1.8712e-5;
+-        const float b1 = -2.7334e-3;
+-        const float c1 =  1.3141;
+-        const float a2 =  2.8305e-6;
+-        const float b2 = -7.4622e-4;
+-        const float c2 =  1.2328;
+-
+-        const float yy_ = 255.0f * y_tmo;
+-
+-        const float t = 70;
++    return vec3(
++        isnan(color.r) || isinf(color.r) ? 0.0f : max(color.r, 0.0f),
++        isnan(color.g) || isinf(color.g) ? 0.0f : max(color.g, 0.0f),
++        isnan(color.b) || isinf(color.b) ? 0.0f : max(color.b, 0.0f));
++}
+ 
+-        float e = yy_ <= t ?
+-            a1 * pow(yy_, 2.f) + b1 * yy_ + c1 : 
+-            a2 * pow(yy_, 2.f) + b2 * yy_ + c2;
++vec3 bounded_color(vec3 color, float upper)
++{
++    return clamp(finite_nonnegative(color), vec3(0.0f), vec3(upper));
++}
+ 
+-        const float y_hdr = pow(yy_, e);
++bool finite_color(vec3 color)
++{
++    return !any(isnan(color)) && !any(isinf(color));
++}
+ 
+-        float s_c = y_tmo > 0.f ?
+-            1.075f * (y_hdr / y_tmo) : 
+-            1.f;
++vec3 rec709_to_rec2020(vec3 linear_rec709)
++{
++    vec3 color = bounded_color(linear_rec709, 1.0f);
++    return color * mat3(
++        0.627403895934699f, 0.329283038377883f, 0.043313065687418f,
++        0.069097289358232f, 0.919540395075459f, 0.011362315566309f,
++        0.016391438875150f, 0.088013307877226f, 0.895595253247624f);
++}
+ 
+-        const float c_b_hdr = c_b_tmo * s_c;
+-        const float c_r_hdr = c_r_tmo * s_c;
++// Conservative global highlight expansion following the design guidance in
++// Rep. ITU-R BT.2446-1 section 5.1. The independently derived quadratic blend
++// preserves display-light shadows and mid-tones and is C1 at the highlight knee.
++vec3 efficient_inverse_tonemapping(
++    vec3  color,
++    float sdr_nits,
++    float target_nits)
++{
++    const vec3 k_bt2020 = vec3(0.262698338956556, 0.678008765772817, 0.0592928952706273);
+ 
+-        color = vec3(clamp(y_hdr + k_bt2020_r_helper * c_r_hdr, 0.f, 1000.f),
+-                     clamp(y_hdr - 0.16455312684366 * c_b_hdr - 0.57135312684366 * c_r_hdr, 0.f, 1000.f),
+-                     clamp(y_hdr + k_bt2020_b_helper * c_b_hdr, 0.f, 1000.f));
+-        color /= 1000.f;
+-    }
+-    else
++    if (isnan(sdr_nits) || isinf(sdr_nits) ||
++        isnan(target_nits) || isinf(target_nits) ||
++        sdr_nits <= 0.0f || target_nits < sdr_nits || target_nits > 10000.0f)
++        return vec3(0.0f);
++
++    color = bounded_color(color, 1.0f);
++    if (all(equal(color, vec3(0.0f))))
++        return vec3(0.0f);
++
++    const float highlight_knee = 0.60f;
++    const float highlight_multiplier = 2.30f;
++    const float luminance = dot(color, k_bt2020);
++    if (luminance <= 0.0f || isnan(luminance) || isinf(luminance))
++        return vec3(0.0f);
++
++    const float expanded_white = sdr_nits *
++        (highlight_knee + highlight_multiplier * (1.0f - highlight_knee));
++    const float mapped_white = min(target_nits, expanded_white);
++    float mapped_luminance = sdr_nits * luminance;
++    if (luminance > highlight_knee && mapped_white > sdr_nits)
+     {
+-        // adjusted luma component (inverse)
+-        // get Y'sdr
+-        const float y_sdr = y_tmo + max(0.1f * c_r_tmo, 0.f);
+-
+-        // Tone mapping step 3 (inverse)
+-        // get Y'c
+-        const float p_sdr = 1 + 32 * pow(
+-                                         sdr_nits /
+-                                         10000.f
+-                                    , gamma);
+-        //Y'c
+-        const float y_c = log((y_sdr * (p_sdr - 1)) + 1) /
+-                          log(p_sdr); //log = ln
+-
+-        // Tone mapping step 2 (inverse)
+-        // get Y'p
+-        float y_p = 0.f;
+-
+-        const float y_p_0 = y_c / 1.0770f;
+-        const float y_p_2 = (y_c - 0.5000f) /
+-                            0.5000f;
+-
+-        const float _first = -2.7811f;
+-        const float  _sqrt = sqrt(4.83307641 - 4.604 * y_c);
+-        const float   _div = -2.302f;
+-        const float  y_p_1 = (_first + _sqrt) /
+-                             _div;
+-
+-        if (y_p_0 <= 0.7399f)
+-            y_p = y_p_0;
+-        else if (y_p_1 > 0.7399f && y_p_1 < 0.9909f)
+-            y_p = y_p_1;
+-        else if (y_p_2 >= 0.9909f)
+-            y_p = y_p_2;
+-        else //y_p_1 sometimes (about 0.12% out of the full RGB range)
+-             //is less than 0.7399f or more than 0.9909f because of float inaccuracies
+-        {
+-            //error is small enough (less than 0.001) for this to be OK
+-            //ideally you would choose between y_p_0 and y_p_1 if y_p_1 < 0.7399f depending on which is closer to 0.7399f
+-            //or between y_p_1 and y_p_2 if y_p_1 > 0.9909f depending on which is closer to 0.9909f
+-            y_p = y_p_1;
+-
+-            //this clamps it to 2 float steps above 0.7399f or 2 float steps below 0.9909f
+-            //if (y_p_1 < 0.7399f)
+-            //	y_p = 0.7399001f;
+-            //else
+-            //	y_p = 0.99089986f;
+-        }
+-
+-        // Tone mapping step 1 (inverse)
+-        // get Y'
+-        const float p_hdr = 1 + 32 * pow(
+-                                         target_nits /
+-                                         10000.f
+-                                    , gamma);
+-        //Y'
+-        const float y_ = (pow(p_hdr, y_p) - 1) /
+-                         (p_hdr - 1);
+-
+-        // Colour scaling function
+-        float col_scale = 0.f;
+-        if (y_ > 0.f) // avoid divison by zero
+-          col_scale = y_sdr /
+-                      (1.1f * y_);
+-
+-        // Colour difference signals (inverse) and Luma (inverse)
+-        // get R'G'B'
+-        color.b = ((c_b_tmo * k_bt2020_b_helper) /
+-                  col_scale) + y_;
+-        color.r = ((c_r_tmo * k_bt2020_r_helper) /
+-                  col_scale) + y_;
+-        color.g = (y_ - (k_bt2020.r * color.r + k_bt2020.b * color.b)) /
+-                  k_bt2020.g;
+-
+-        //safety
+-        color.r = clamp(color.r, 0.f, 1.f);
+-        color.g = clamp(color.g, 0.f, 1.f);
+-        color.b = clamp(color.b, 0.f, 1.f);
++        const float t = (luminance - highlight_knee) / (1.0f - highlight_knee);
++        mapped_luminance += (mapped_white - sdr_nits) * t * t;
+     }
+ 
+-    // R'G'B' gamma expansion
+-    color = pow(color, vec3(inverse_gamma));
+-
+-    // map target luminance into 10000 nits
+-    color = color * target_nits;
++    vec3 mapped = color * (mapped_luminance / luminance);
++    const float max_channel = max(mapped.r, max(mapped.g, mapped.b));
++    if (max_channel > target_nits)
++        mapped *= target_nits / max_channel;
+ 
+-    return color;
++    return finite_color(mapped) ? bounded_color(mapped, target_nits) : vec3(0.0f);
+ }
+ 
+ #include "heatmap.h"
+diff --git a/src/shaders/composite.h b/src/shaders/composite.h
+index 961379b0ab8390ea771a6d9ac8bd4c8e4a363f56..d511c3ce017f077f0d4dc66c8197769cdf5d329f 100644
+--- a/src/shaders/composite.h
++++ b/src/shaders/composite.h
+@@ -79,9 +79,13 @@ vec3 apply_layer_color_mgmt(vec3 color, uint layer, uint colorspace) {
+     if (colorspace == colorspace_passthru)
+         return color;
+ 
+-    if (c_itm_enable)
++    bool auto_hdr_eligible = colorspace == colorspace_linear || colorspace == colorspace_sRGB;
++    bool auto_hdr_enabled = layer < 32u && (c_auto_hdr_layer_mask & (1u << layer)) != 0u;
++    if (auto_hdr_enabled && auto_hdr_eligible)
+     {
+-        color = bt2446a_inverse_tonemapping(color, u_itmSdrNits, u_itmTargetNits);
++        color = rec709_to_rec2020(color);
++        color = nitsToScRGB(efficient_inverse_tonemapping(color, u_itmSdrNits, u_itmTargetNits));
++        // Values use scRGB luminance units, but the mapped primaries are BT.2020.
+         colorspace = colorspace_pq;
+     }
+ 
+@@ -178,7 +182,7 @@ vec4 sampleLayerEx(sampler2D layerSampler, uint offsetLayerIdx, uint colorspaceL
+     }
+     // JoshA: AMDGPU applies 3x4 CTM like this, where A is 1.0, but it only affects .rgb.
+     color.rgb = vec4(color.rgb, 1.0f) * u_ctm[colorspaceLayerIdx];
+-    color.rgb = apply_layer_color_mgmt(color.rgb, offsetLayerIdx, colorspace);
++    color.rgb = apply_layer_color_mgmt(color.rgb, colorspaceLayerIdx, colorspace);
+ 
+     return color;
+ }
+diff --git a/src/shaders/descriptor_set.h b/src/shaders/descriptor_set.h
+index bc3a152e8b9a42fd997979839c1a580ae3bd7bce..bb5d63b93320c7bfc403676ae9556f666ac7d708 100644
+--- a/src/shaders/descriptor_set.h
++++ b/src/shaders/descriptor_set.h
+@@ -7,7 +7,7 @@ layout(constant_id = 3) const int  c_blur_layer_count = 0;
+ 
+ layout(constant_id = 4) const uint c_colorspaceMask = 0;
+ layout(constant_id = 5) const uint c_output_eotf = 0;
+-layout(constant_id = 6) const bool c_itm_enable = false;
++layout(constant_id = 6) const uint c_auto_hdr_layer_mask = 0;
+ 
+ layout(constant_id = 7) const uint c_rotation = 0; // 1: right, 2: left, 3: upsidedown
+ 
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+index 8807059fa3c1dff8e15b93afb729f6716af4fab1..a139d30d31ea65ed84e115a2b92214ca5fece9db 100644
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -30,6 +30,8 @@
+  */
+ 
+ #include "backend.h"
++#include "AutoHDRPolicy.h"
++#include "AutoHDRRootProperties.h"
+ #include "HDRGamma22.h"
+ #include "gamescope_shared.h"
+ #include "xwayland_ctx.hpp"
+@@ -47,6 +49,7 @@
+ #include <vector>
+ #include <algorithm>
+ #include <array>
++#include <bit>
+ #include <iostream>
+ #include <fstream>
+ #include <string>
+@@ -126,6 +129,7 @@ static const int g_nBaseCursorScale = 36;
+ LogScope xwm_log("xwm");
+ LogScope focus_log("focus");
+ LogScope g_WaitableLog("waitable");
++LogScope auto_hdr_log("auto-hdr");
+ 
+ gamescope::ConVar<bool> cv_overlay_unmultiplied_alpha{ "overlay_unmultiplied_alpha", false };
+ 
+@@ -471,6 +475,8 @@ bool g_bSupportsHDR_CachedValue = false;
+ bool g_bForceHDR10OutputDebug = false;
+ gamescope::ConVar<bool> cv_hdr_enabled{ "hdr_enabled", false, "Whether or not HDR is enabled if it is available." };
+ bool g_bHDRItmEnable = false;
++bool g_bAutoHDRActive = false;
++bool g_bAutoHDRActiveCached = false;
+ int g_nCurrentRefreshRate_CachedValue = 0;
+ 
+ static void
+@@ -2041,6 +2047,7 @@ struct BaseLayerInfo_t
+ 	float opacity;
+ 	GamescopeUpscaleFilter filter;
+ 	AlphaBlendingMode_t eAlphaBlendingMode = ALPHA_BLENDING_MODE_PREMULTIPLIED;
++	bool autoHDRCandidate = false;
+ };
+ 
+ std::array< BaseLayerInfo_t, HELD_COMMIT_COUNT > g_CachedPlanes = {};
+@@ -2072,6 +2079,7 @@ paint_cached_base_layer(const gamescope::Rc<commit_t>& commit, const BaseLayerIn
+ 	layer->filter = base.filter;
+ 	layer->eAlphaBlendingMode = base.eAlphaBlendingMode;
+ 	layer->blackBorder = true;
++	layer->autoHDRCandidate = base.autoHDRCandidate;
+ }
+ 
+ namespace PaintWindowFlag
+@@ -2254,6 +2262,19 @@ paint_window_commit( const gamescope::Rc<commit_t> &lastCommit, steamcompmgr_win
+ 	}
+ 
+ 	layer->eAlphaBlendingMode = ( flags & PaintWindowFlag::CoverageMode ) ? ALPHA_BLENDING_MODE_COVERAGE : ALPHA_BLENDING_MODE_PREMULTIPLIED;
++	layer->autoHDRCandidate =
++		( flags & PaintWindowFlag::BasePlane ) &&
++		w->appID != 0 &&
++		!lastCommit->is_steam &&
++		!window_is_steam( w ) &&
++		!w->bIsSteamPid &&
++		!w->bIsSteamWebHelperPid &&
++		!w->bIsVRWebHelperPid &&
++		!w->isSteamStreamingClient &&
++		!w->isSteamStreamingClientVideo &&
++		!w->isOverlay &&
++		!w->isExternalOverlay &&
++		!( flags & PaintWindowFlag::NotificationMode );
+ 
+ 	return layer;
+ }
+@@ -2300,6 +2321,7 @@ paint_window(steamcompmgr_win_t *w, steamcompmgr_win_t *scaleW, struct FrameInfo
+ 		basePlane.opacity = layer->opacity;
+ 		basePlane.filter = layer->filter;
+ 		basePlane.eAlphaBlendingMode = layer->eAlphaBlendingMode;
++		basePlane.autoHDRCandidate = layer->autoHDRCandidate;
+ 
+ 		g_CachedPlanes[ HELD_COMMIT_BASE ] = basePlane;
+ 		if ( !(flags & PaintWindowFlag::FadeTarget) )
+@@ -2519,6 +2541,87 @@ gamescope::ConVar<bool> cv_paint_external_overlay_plane{ "paint_external_overlay
+ gamescope::ConVar<bool> cv_paint_cursor_plane{ "paint_cursor_plane", true };
+ gamescope::ConVar<bool> cv_paint_mura_plane{ "paint_mura_plane", true };
+ 
++static void update_auto_hdr_policy( FrameInfo_t *frameInfo, gamescope::IBackendConnector *connector, steamcompmgr_win_t *baseWindow, bool colorManagementUsable )
++{
++	gamescope::autohdr::PolicyInput input;
++	input.requested = g_bHDRItmEnable;
++	input.hdrOutputActive = connector && g_bOutputHDREnabled && connector->IsHDRActive();
++	input.outputQualified = connector && connector->SupportsHDR() && connector->GetHDRInfo().bExposeHDRSupport;
++	input.calibrationAvailable = connector && connector->GetHDRInfo().uMaxContentLightLevel > 0;
++	input.colorManagementReady =
++		colorManagementUsable &&
++		g_ColorMgmt.pending.enabled &&
++		g_ColorMgmt.serial != 0 &&
++		g_ColorMgmt.pending == g_ColorMgmt.current &&
++		g_ColorMgmtLuts[EOTF_Gamma22].HasLuts() &&
++		g_ColorMgmtLuts[EOTF_Gamma22].vk_lut1d &&
++		g_ColorMgmtLuts[EOTF_Gamma22].vk_lut3d &&
++		g_ColorMgmtLuts[EOTF_PQ].HasLuts() &&
++		g_ColorMgmtLuts[EOTF_PQ].vk_lut1d &&
++		g_ColorMgmtLuts[EOTF_PQ].vk_lut3d;
++	input.steamOrSystemUIFocused = baseWindow &&
++		( window_is_steam( baseWindow ) ||
++		  baseWindow->bIsSteamPid ||
++		  baseWindow->bIsSteamWebHelperPid ||
++		  baseWindow->bIsVRWebHelperPid );
++	input.sdrReferenceNits = g_flHDRItmSdrNits;
++	input.targetNits = g_flHDRItmTargetNits;
++	input.calibratedOutputPeakNits = connector ? connector->GetHDRInfo().uMaxContentLightLevel : 0.0;
++	const int rawLayerCount = frameInfo->layerCount;
++	input.activeLayerCount = rawLayerCount >= 0 && rawLayerCount <= k_nMaxLayers
++		? uint32_t( rawLayerCount )
++		: gamescope::autohdr::MaxPolicyLayers + 1;
++
++	const uint32_t layerCountToCopy = rawLayerCount > 0
++		? std::min<uint32_t>( uint32_t( rawLayerCount ), k_nMaxLayers )
++		: 0;
++	for ( uint32_t i = 0; i < layerCountToCopy; i++ )
++	{
++		const FrameInfo_t::Layer_t &layer = frameInfo->layers[i];
++		input.layers[i].sceneCandidate = layer.autoHDRCandidate && !layer.hdr_metadata_blob;
++		input.layers[i].colorspace = layer.colorspace;
++	}
++
++	const gamescope::autohdr::PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
++	frameInfo->autoHDRLayerMask = result.layerMask;
++	g_bAutoHDRActive = gamescope::autohdr::activeFromLayerMask( result.layerMask );
++
++	static bool logged = false;
++	static gamescope::autohdr::PolicyResult previous;
++	static uint64_t previousConnectorID = 0;
++	static uint64_t previousSdrBits = 0;
++	static uint64_t previousTargetBits = 0;
++	static uint64_t previousPeakBits = 0;
++	const uint64_t connectorID = connector ? connector->GetConnectorID() : 0;
++	const uint64_t sdrBits = std::bit_cast<uint64_t>( input.sdrReferenceNits );
++	const uint64_t targetBits = std::bit_cast<uint64_t>( input.targetNits );
++	const uint64_t peakBits = std::bit_cast<uint64_t>( input.calibratedOutputPeakNits );
++	if ( !logged ||
++		 previous.layerMask != result.layerMask ||
++		 previous.reason != result.reason ||
++		 previousConnectorID != connectorID ||
++		 previousSdrBits != sdrBits ||
++		 previousTargetBits != targetBits ||
++		 previousPeakBits != peakBits )
++	{
++		auto_hdr_log.infof( "connector=%s id=%" PRIu64 " policy=%.*s layer-mask=0x%08x sdr=%.1f target=%.1f peak=%.1f nits",
++			connector ? connector->GetName() : "none",
++			connectorID,
++			int( gamescope::autohdr::policyReasonName( result.reason ).size() ),
++			gamescope::autohdr::policyReasonName( result.reason ).data(),
++			result.layerMask,
++			input.sdrReferenceNits,
++			input.targetNits,
++			input.calibratedOutputPeakNits );
++		previous = result;
++		previousConnectorID = connectorID;
++		previousSdrBits = sdrBits;
++		previousTargetBits = targetBits;
++		previousPeakBits = peakBits;
++		logged = true;
++	}
++}
++
+ static void
+ paint_all( global_focus_t *pFocus, bool async )
+ {
+@@ -2760,6 +2863,18 @@ paint_all( global_focus_t *pFocus, bool async )
+ 			&frameInfo);
+ 	}
+ 
++	for ( uint32_t i = 0; i < EOTF_Count; i++ )
++	{
++		if ( g_ColorMgmtLuts[i].HasLuts() )
++		{
++			frameInfo.shaperLut[i] = g_ColorMgmtLuts[i].vk_lut1d;
++			frameInfo.lut3D[i] = g_ColorMgmtLuts[i].vk_lut3d;
++		}
++	}
++
++	const bool bDoMuraCompensation = is_mura_correction_enabled() && frameInfo.layerCount && cv_paint_mura_plane;
++	update_auto_hdr_policy( &frameInfo, pConnector, w, !bDoMuraCompensation );
++
+ 	if ( !bValidContents || GetBackend()->IsPaused() )
+ 	{
+ 		return;
+@@ -2829,7 +2944,6 @@ paint_all( global_focus_t *pFocus, bool async )
+ 		}
+ 	}
+ 
+-	bool bDoMuraCompensation = is_mura_correction_enabled() && frameInfo.layerCount && cv_paint_mura_plane;
+ 	if ( bDoMuraCompensation )
+ 	{
+ 		auto& MuraCorrectionImage = s_MuraCorrectionImage[GetBackend()->GetScreenType()];
+@@ -2852,15 +2966,6 @@ paint_all( global_focus_t *pFocus, bool async )
+ 		frameInfo.applyOutputColorMgmt = false;
+ 	}
+ 
+-	for (uint32_t i = 0; i < EOTF_Count; i++)
+-	{
+-		if ( g_ColorMgmtLuts[i].HasLuts() )
+-		{
+-			frameInfo.shaperLut[i] = g_ColorMgmtLuts[i].vk_lut1d;
+-			frameInfo.lut3D[i] = g_ColorMgmtLuts[i].vk_lut3d;
+-		}
+-	}
+-
+ 	if ( pConnector && pConnector->Present( &frameInfo, async ) != 0 )
+ 	{
+ 		return;
+@@ -2888,6 +2993,7 @@ paint_all( global_focus_t *pFocus, bool async )
+ 
+ 		if ( pScreenshotTexture )
+ 		{
++			frameInfo.autoHDRLayerMask = 0;
+ 			bool bHDRScreenshot = path.extension() == ".avif" &&
+ 								  frameInfo.layerCount > 0 &&
+ 								  ColorspaceIsHDR( frameInfo.layers[0].colorspace ) &&
+@@ -7927,9 +8033,11 @@ void init_xwayland_ctx(uint32_t serverId, gamescope_xwayland_server_t *xwayland_
+ 	ctx->atoms.gamescopeSDROnHDRContentBrightness = XInternAtom( ctx->dpy, "GAMESCOPE_SDR_ON_HDR_CONTENT_BRIGHTNESS", false );
+ 	ctx->atoms.gamescopeHDRInputGain = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_INPUT_GAIN", false );
+ 	ctx->atoms.gamescopeSDRInputGain = XInternAtom( ctx->dpy, "GAMESCOPE_SDR_INPUT_GAIN", false );
+-	ctx->atoms.gamescopeHDRItmEnable = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_ITM_ENABLE", false );
++	ctx->atoms.gamescopeHDRItmSupported = XInternAtom( ctx->dpy, gamescope::autohdr::SupportedAtomName.data(), false );
++	ctx->atoms.gamescopeHDRItmEnable = XInternAtom( ctx->dpy, gamescope::autohdr::EnableAtomName.data(), false );
+ 	ctx->atoms.gamescopeHDRItmSDRNits = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_ITM_SDR_NITS", false );
+ 	ctx->atoms.gamescopeHDRItmTargetNits = XInternAtom( ctx->dpy, "GAMESCOPE_HDR_ITM_TARGET_NITS", false );
++	ctx->atoms.gamescopeAutoHDRActiveFeedback = XInternAtom( ctx->dpy, gamescope::autohdr::ActiveFeedbackAtomName.data(), false );
+ 	ctx->atoms.gamescopeColorLookPQ = XInternAtom( ctx->dpy, "GAMESCOPE_COLOR_LOOK_PQ", false );
+ 	ctx->atoms.gamescopeColorLookG22 = XInternAtom( ctx->dpy, "GAMESCOPE_COLOR_LOOK_G22", false );
+ 	ctx->atoms.gamescopeColorOutputVirtualWhite = XInternAtom( ctx->dpy, "GAMESCOPE_DISPLAY_VIRTUAL_WHITE", false );
+@@ -8111,6 +8219,18 @@ void update_vrr_atoms(xwayland_ctx_t *root_ctx, bool force, bool* needs_flush =
+ 	}
+ }
+ 
++static void publish_initial_auto_hdr_atoms( xwayland_ctx_t *root_ctx )
++{
++	const gamescope::autohdr::RootPropertyValues values =
++		gamescope::autohdr::initialRootPropertyValues( g_bHDRItmEnable );
++	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmSupported,
++		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.supported ), 1 );
++	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeHDRItmEnable,
++		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.enabled ), 1 );
++	XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeAutoHDRActiveFeedback,
++		XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &values.active ), 1 );
++}
++
+ void update_mode_atoms(xwayland_ctx_t *root_ctx, bool* needs_flush = nullptr)
+ {
+ 	if (needs_flush)
+@@ -8497,6 +8617,7 @@ steamcompmgr_main(int argc, char **argv)
+ 
+ 	update_vrr_atoms(root_ctx, true);
+ 	update_mode_atoms(root_ctx);
++	publish_initial_auto_hdr_atoms( root_ctx );
+ 	XFlush(root_ctx->dpy);
+ 
+ 	if ( !GetBackend()->PostInit() )
+@@ -8924,6 +9045,15 @@ steamcompmgr_main(int argc, char **argv)
+ 
+ 
+ 		{
++			if ( g_bAutoHDRActive != g_bAutoHDRActiveCached )
++			{
++				const uint32_t active = g_bAutoHDRActive ? 1u : 0u;
++				XChangeProperty( root_ctx->dpy, root_ctx->root, root_ctx->atoms.gamescopeAutoHDRActiveFeedback,
++					XA_CARDINAL, 32, PropModeReplace, reinterpret_cast<const unsigned char *>( &active ), 1 );
++				g_bAutoHDRActiveCached = g_bAutoHDRActive;
++				flush_root = true;
++			}
++
+ 			GamescopeAppTextureColorspace current_app_colorspace = GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB;
+ 			std::shared_ptr<gamescope::BackendBlob> app_hdr_metadata = nullptr;
+ 			if ( g_HeldCommits[HELD_COMMIT_BASE] != nullptr )
+diff --git a/src/xwayland_ctx.hpp b/src/xwayland_ctx.hpp
+index d680fbfe90f11709d1f15670b199ab21c17ad9f4..fc8d96e38cebb8a00b092c59d30b2c520d955130 100644
+--- a/src/xwayland_ctx.hpp
++++ b/src/xwayland_ctx.hpp
+@@ -210,9 +210,11 @@ struct xwayland_ctx_t final : public gamescope::IWaitable
+ 		Atom gamescopeSDROnHDRContentBrightness;
+ 		Atom gamescopeHDRInputGain;
+ 		Atom gamescopeSDRInputGain;
++		Atom gamescopeHDRItmSupported;
+ 		Atom gamescopeHDRItmEnable;
+ 		Atom gamescopeHDRItmSDRNits;
+ 		Atom gamescopeHDRItmTargetNits;
++		Atom gamescopeAutoHDRActiveFeedback;
+ 		Atom gamescopeColorLookPQ;
+ 		Atom gamescopeColorLookG22;
+ 		Atom gamescopeColorOutputVirtualWhite;
+diff --git a/tests/meson.build b/tests/meson.build
+index 187db547ff20e1f9b51922573ac06d1372b41fdc..49b185388d3aa3f8bdd0ca3b4ac8bd9d71a83d71 100644
+--- a/tests/meson.build
++++ b/tests/meson.build
+@@ -23,3 +23,35 @@ test_wsi_hdr_surface_formats = executable(
+ 	dependencies: [catch2_dep, vulkan_dep],
+ )
+ test('wsi-hdr-surface-formats', test_wsi_hdr_surface_formats)
++
++test_auto_hdr_color = executable(
++	'test_auto_hdr_color',
++	['test_auto_hdr_color.cpp', '../src/AutoHDRColor.cpp'],
++	include_directories: ['../src'],
++	cpp_args: gamescope_cpp_args + ['-fno-fast-math'],
++)
++test('auto-hdr-color', test_auto_hdr_color)
++
++test_auto_hdr_policy = executable(
++	'test_auto_hdr_policy',
++	['test_auto_hdr_policy.cpp', '../src/AutoHDRPolicy.cpp'],
++	include_directories: ['../src'],
++	cpp_args: gamescope_cpp_args + ['-fno-fast-math'],
++)
++test('auto-hdr-policy', test_auto_hdr_policy)
++
++test_auto_hdr_policy_fast_math = executable(
++	'test_auto_hdr_policy_fast_math',
++	['test_auto_hdr_policy.cpp', '../src/AutoHDRPolicy.cpp'],
++	include_directories: ['../src'],
++	cpp_args: gamescope_cpp_args,
++)
++test('auto-hdr-policy-fast-math', test_auto_hdr_policy_fast_math)
++
++test_auto_hdr_root_properties = executable(
++	'test_auto_hdr_root_properties',
++	['test_auto_hdr_root_properties.cpp'],
++	include_directories: ['../src'],
++	cpp_args: gamescope_cpp_args,
++)
++test('auto-hdr-root-properties', test_auto_hdr_root_properties)
+diff --git a/tests/test_auto_hdr_color.cpp b/tests/test_auto_hdr_color.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..df851c5a15dc9a3b3bd8ec8d8781bb65260433d3
+--- /dev/null
++++ b/tests/test_auto_hdr_color.cpp
+@@ -0,0 +1,245 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRColor.h"
++
++#include <array>
++#include <cmath>
++#include <cstdlib>
++#include <iostream>
++#include <limits>
++#include <string_view>
++
++using gamescope::autohdr::Config;
++using gamescope::autohdr::RGB;
++using gamescope::autohdr::RGBA;
++
++namespace
++{
++	int failures = 0;
++
++	void check( bool condition, std::string_view message )
++	{
++		if ( condition )
++			return;
++		std::cerr << "FAIL: " << message << '\n';
++		failures++;
++	}
++
++	void near( double actual, double expected, double tolerance, std::string_view message )
++	{
++		if ( std::isfinite( actual ) && std::abs( actual - expected ) <= tolerance )
++			return;
++		std::cerr << "FAIL: " << message << " (actual=" << actual << ", expected=" << expected << ")\n";
++		failures++;
++	}
++
++	bool finiteAndBounded( const RGB &value, double peak )
++	{
++		return std::isfinite( value.r ) && std::isfinite( value.g ) && std::isfinite( value.b ) &&
++			value.r >= 0.0 && value.g >= 0.0 && value.b >= 0.0 &&
++			value.r <= peak && value.g <= peak && value.b <= peak;
++	}
++
++	double neutralNits( double level, const Config &config )
++	{
++		const auto mapped = gamescope::autohdr::efficientInverseToneMap( { level, level, level }, config );
++		return mapped ? mapped->r : std::numeric_limits<double>::quiet_NaN();
++	}
++}
++
++int main()
++{
++	using namespace gamescope::autohdr;
++
++	near( srgbDecode( 0.0 ), 0.0, 0.0, "sRGB black" );
++	near( srgbDecode( 0.04045 ), 0.00313080495356037, 1e-15, "sRGB linear segment boundary" );
++	near( srgbDecode( 0.5 ), 0.214041140482233, 1e-14, "sRGB 0.5 decode" );
++	near( srgbDecode( 1.0 ), 1.0, 0.0, "sRGB white" );
++
++	const RGB neutral2020 = rec709ToRec2020( { 0.37, 0.37, 0.37 } );
++	near( neutral2020.r, 0.37, 2e-15, "Rec.709 to Rec.2020 neutral red" );
++	near( neutral2020.g, 0.37, 2e-15, "Rec.709 to Rec.2020 neutral green" );
++	near( neutral2020.b, 0.37, 2e-15, "Rec.709 to Rec.2020 neutral blue" );
++	const RGB red2020 = rec709ToRec2020( { 1.0, 0.0, 0.0 } );
++	near( red2020.r, 0.627403895934699, 1e-15, "Rec.709 red matrix R" );
++	near( red2020.g, 0.069097289358232, 1e-15, "Rec.709 red matrix G" );
++	near( red2020.b, 0.016391438875150, 1e-15, "Rec.709 red matrix B" );
++
++	near( pqEncodeNits( 0.0 ), 7.30955902578397e-7, 1e-18, "PQ code for zero nits" );
++	near( pqEncodeNits( 80.0 ), 0.4858567653886785, 1e-14, "PQ code for 80 nits" );
++	near( pqEncodeNits( 100.0 ), 0.508078421517399, 1e-14, "PQ code for 100 nits" );
++	near( pqEncodeNits( 203.0 ), 0.5806888810416109, 1e-14, "PQ code for 203 nits" );
++	near( pqEncodeNits( 650.0 ), 0.7049692700077218, 1e-14, "PQ code for 650 nits" );
++	near( pqEncodeNits( 1000.0 ), 0.751827096247041, 1e-14, "PQ code for 1000 nits" );
++	near( pqEncodeNits( 10000.0 ), 1.0, 1e-14, "PQ code for 10000 nits" );
++	near( pqDecodeNits( pqEncodeNits( 650.0 ) ), 650.0, 1e-9, "PQ 650-nit round trip" );
++	near( nitsToScRGB( 650.0 ), 8.125, 0.0, "nits-to-scRGB divide by 80" );
++	near( scRGBToNits( nitsToScRGB( 650.0 ) ), 650.0, 0.0, "scRGB handoff round trip" );
++	near( pqEncodeNits( scRGBToNits( nitsToScRGB( 650.0 ) ) ), pqEncodeNits( 650.0 ), 0.0,
++		"scRGB handoff reaches PQ without a second light-scale conversion" );
++
++	check( validConfig( { 100.0, 650.0 } ), "100/650 config valid" );
++	check( validConfig( { 100.0, 1000.0 } ), "100/1000 config valid" );
++	check( validConfig( { 203.0, 650.0 } ), "203/650 config valid" );
++	check( validConfig( { 203.0, 203.0 } ), "equal reference and target valid" );
++	check( !validConfig( { 0.0, 650.0 } ), "zero SDR reference rejected" );
++	check( !validConfig( { 650.0, 203.0 } ), "peak below SDR reference rejected" );
++	check( !validConfig( { 100.0, 10001.0 } ), "peak above PQ range rejected" );
++	check( !validConfig( { std::numeric_limits<double>::quiet_NaN(), 650.0 } ), "nonfinite config rejected" );
++	check( !efficientInverseToneMap( { 1.0, 1.0, 1.0 }, { 0.0, 650.0 } ), "invalid config fails closed" );
++
++	constexpr Config odinConfig{ 203.0, 650.0 };
++	const std::array<std::pair<double, double>, 9> neutralGolden = {{
++		{ 0.00, 0.0000 },
++		{ 0.01, 2.0300 },
++		{ 0.18, 36.5400 },
++		{ 0.50, 101.5000 },
++		{ 0.60, 121.8000 },
++		{ 0.70, 148.6975 },
++		{ 0.80, 188.7900 },
++		{ 0.90, 242.0775 },
++		{ 1.00, 308.5600 },
++	}};
++	for ( const auto &[input, expected] : neutralGolden )
++		near( neutralNits( input, odinConfig ), expected, 1e-9, "Odin efficient neutral golden" );
++
++	// The low and middle range is exactly the unexpanded display-light path.
++	for ( int step = 0; step <= 600; step++ )
++	{
++		const double level = step / 1000.0;
++		near( neutralNits( level, odinConfig ), odinConfig.sdrNits * level, 1e-10,
++			"Odin efficient shadows and mid-tones unchanged" );
++	}
++
++	// The independently derived quadratic is C1 at the 0.60 knee.
++	constexpr double knee = 0.60;
++	constexpr double epsilon = 1e-6;
++	const double leftSlope = ( neutralNits( knee, odinConfig ) - neutralNits( knee - epsilon, odinConfig ) ) / epsilon;
++	const double rightSlope = ( neutralNits( knee + epsilon, odinConfig ) - neutralNits( knee, odinConfig ) ) / epsilon;
++	near( leftSlope, odinConfig.sdrNits, 1e-7, "Odin efficient left knee slope" );
++	near( rightSlope, odinConfig.sdrNits, 1e-3, "Odin efficient right knee slope" );
++
++	for ( const Config config : { Config{ 100.0, 650.0 }, Config{ 100.0, 1000.0 }, odinConfig } )
++	{
++		const auto black = efficientInverseToneMap( { 0.0, 0.0, 0.0 }, config );
++		check( black.has_value(), "black conversion accepted" );
++		if ( black )
++		{
++			near( black->r, 0.0, 0.0, "exact black red" );
++			near( black->g, 0.0, 0.0, "exact black green" );
++			near( black->b, 0.0, 0.0, "exact black blue" );
++		}
++
++		double previous = -1.0;
++		for ( int step = 0; step <= 4096; step++ )
++		{
++			const double level = step / 4096.0;
++			const auto output = efficientInverseToneMap( { level, level, level }, config );
++			check( output.has_value(), "dense neutral conversion accepted" );
++			if ( !output )
++				continue;
++			check( finiteAndBounded( *output, config.targetNits ), "dense neutral finite and bounded" );
++			check( output->r + 1e-10 >= previous, "dense neutral monotonic" );
++			near( output->r, output->g, 2e-9, "neutral R/G preserved" );
++			near( output->g, output->b, 2e-9, "neutral G/B preserved" );
++			previous = output->r;
++		}
++
++		for ( int r = 0; r <= 16; r++ )
++			for ( int g = 0; g <= 16; g++ )
++				for ( int b = 0; b <= 16; b++ )
++				{
++					const auto output = efficientInverseToneMap(
++						{ r / 16.0, g / 16.0, b / 16.0 }, config );
++					check( output.has_value(), "dense RGB conversion accepted" );
++					if ( output )
++						check( finiteAndBounded( *output, config.targetNits ), "dense RGB finite and bounded" );
++				}
++	}
++
++	const auto red = efficientInverseToneMap( { 1.0, 0.0, 0.0 }, odinConfig );
++	check( red.has_value(), "saturated red conversion accepted" );
++	if ( red )
++	{
++		near( red->r, 203.0, 1e-12, "below-knee red follows baseline" );
++		near( red->g, 0.0, 0.0, "red green remains zero" );
++		near( red->b, 0.0, 0.0, "red blue remains zero" );
++	}
++	const auto saturated = efficientInverseToneMap( { 1.0, 0.0, 1.0 }, odinConfig );
++	check( saturated.has_value() && finiteAndBounded( *saturated, odinConfig.targetNits ),
++		"Odin saturated input finite and bounded" );
++
++	const RGB chromaticInput{ 0.8, 0.6, 0.2 };
++	const auto chromatic = efficientInverseToneMap( chromaticInput, odinConfig );
++	check( chromatic.has_value(), "chromatic conversion accepted" );
++	if ( chromatic )
++	{
++		near( chromatic->r / chromatic->g, chromaticInput.r / chromaticInput.g, 1e-12,
++			"common luminance scale preserves R/G ratio" );
++		near( chromatic->g / chromatic->b, chromaticInput.g / chromaticInput.b, 1e-12,
++			"common luminance scale preserves G/B ratio" );
++	}
++
++	// A low target remains a strict cap and smoothly reduces highlight expansion.
++	const auto cappedWhite = efficientInverseToneMap( { 1.0, 1.0, 1.0 }, { 203.0, 250.0 } );
++	check( cappedWhite.has_value(), "low-target white accepted" );
++	if ( cappedWhite )
++		near( cappedWhite->r, 250.0, 1e-10, "low target caps white" );
++	const auto unexpandedWhite = efficientInverseToneMap( { 1.0, 1.0, 1.0 }, { 203.0, 203.0 } );
++	check( unexpandedWhite.has_value(), "equal-target white accepted" );
++	if ( unexpandedWhite )
++		near( unexpandedWhite->r, 203.0, 1e-10, "equal target disables expansion" );
++
++	const RGBA encodedInput{ 0.5, 0.25, 0.75, 0.37123456789 };
++	const auto converted = convertSRGBToHDRNits( encodedInput, odinConfig );
++	check( converted.has_value(), "RGBA conversion accepted" );
++	if ( converted )
++	{
++		near( converted->a, encodedInput.a, 0.0, "alpha preserved exactly" );
++		check( finiteAndBounded( { converted->r, converted->g, converted->b }, odinConfig.targetNits ),
++			"RGBA output finite and bounded" );
++	}
++
++	const auto hostile = convertSRGBToHDRNits(
++		{ -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), 0.5 },
++		odinConfig );
++	check( hostile.has_value(), "hostile RGB input safely handled" );
++	if ( hostile )
++	{
++		near( hostile->r, 0.0, 0.0, "negative input clamps to black" );
++		near( hostile->g, 0.0, 0.0, "infinite input clamps to black" );
++		near( hostile->b, 0.0, 0.0, "NaN input clamps to black" );
++		near( hostile->a, 0.5, 0.0, "hostile alpha preserved" );
++	}
++
++	const RGBA generalInput{ 0.5, 0.25, 0.75, 0.37123456789 };
++	const auto generalConverted = convertSRGBToHDRNits( generalInput, { 100.0, 650.0 } );
++	check( generalConverted.has_value(), "100/650 RGBA conversion accepted" );
++	if ( generalConverted )
++	{
++		near( generalConverted->a, generalInput.a, 0.0, "100/650 alpha preserved exactly" );
++		check( finiteAndBounded( { generalConverted->r, generalConverted->g, generalConverted->b }, 650.0 ),
++			"100/650 RGBA output finite and bounded" );
++	}
++
++	const auto generalHostile = convertSRGBToHDRNits(
++		{ -1.0, std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), 0.75 },
++		{ 100.0, 650.0 } );
++	check( generalHostile.has_value(), "100/650 hostile input safely handled" );
++	if ( generalHostile )
++	{
++		near( generalHostile->r, 0.0, 0.0, "100/650 hostile red clamps to black" );
++		near( generalHostile->g, 0.0, 0.0, "100/650 hostile green clamps to black" );
++		near( generalHostile->b, 0.0, 0.0, "100/650 hostile blue clamps to black" );
++		near( generalHostile->a, 0.75, 0.0, "100/650 hostile alpha preserved" );
++	}
++
++	if ( failures != 0 )
++	{
++		std::cerr << failures << " Auto HDR color reference test(s) failed\n";
++		return EXIT_FAILURE;
++	}
++
++	std::cout << "Auto HDR color reference tests passed\n";
++	return EXIT_SUCCESS;
++}
+diff --git a/tests/test_auto_hdr_policy.cpp b/tests/test_auto_hdr_policy.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..e0ff7200e2ddb56be6f5c0a7577b5a56b231ed5d
+--- /dev/null
++++ b/tests/test_auto_hdr_policy.cpp
+@@ -0,0 +1,200 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRPolicy.h"
++
++#include <cstdlib>
++#include <cstdint>
++#include <iostream>
++#include <limits>
++#include <array>
++#include <string_view>
++#include <utility>
++
++using gamescope::autohdr::PolicyInput;
++using gamescope::autohdr::PolicyReason;
++using gamescope::autohdr::PolicyResult;
++
++namespace
++{
++	int failures = 0;
++
++	void check( bool condition, std::string_view message )
++	{
++		if ( condition )
++			return;
++		std::cerr << "FAIL: " << message << '\n';
++		failures++;
++	}
++
++	PolicyInput validInput()
++	{
++		PolicyInput input;
++		input.requested = true;
++		input.hdrOutputActive = true;
++		input.outputQualified = true;
++		input.calibrationAvailable = true;
++		input.colorManagementReady = true;
++		input.sdrReferenceNits = 203.0;
++		input.targetNits = 650.0;
++		input.calibratedOutputPeakNits = 650.0;
++		input.activeLayerCount = 1;
++		input.layers[0] = { true, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB };
++		return input;
++	}
++
++	void expectStopped( const PolicyInput &input, PolicyReason reason, std::string_view message )
++	{
++		const PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
++		check( result.layerMask == 0, message );
++		check( result.reason == reason, message );
++		check( !result.requiresComposition(), message );
++	}
++}
++
++int main()
++{
++	{
++		PolicyInput input = validInput();
++		input.requested = false;
++		expectStopped( input, PolicyReason::RequestDisabled, "request off" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.hdrOutputActive = false;
++		expectStopped( input, PolicyReason::HDROutputInactive, "HDR output off" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.outputQualified = false;
++		expectStopped( input, PolicyReason::OutputUnqualified, "unqualified output" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.calibrationAvailable = false;
++		expectStopped( input, PolicyReason::CalibrationUnavailable, "calibration unavailable" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.colorManagementReady = false;
++		expectStopped( input, PolicyReason::ColorManagementNotReady, "color management not ready" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.steamOrSystemUIFocused = true;
++		expectStopped( input, PolicyReason::SteamOrSystemUIFocused, "Steam or system UI focused" );
++	}
++
++	for ( const double bad : { std::numeric_limits<double>::quiet_NaN(),
++			std::numeric_limits<double>::infinity(), -1.0, 0.0 } )
++	{
++		PolicyInput input = validInput();
++		input.sdrReferenceNits = bad;
++		expectStopped( input, PolicyReason::InvalidConfiguration, "invalid SDR reference" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.targetNits = std::numeric_limits<double>::quiet_NaN();
++		expectStopped( input, PolicyReason::InvalidConfiguration, "NaN target" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.targetNits = std::numeric_limits<double>::infinity();
++		expectStopped( input, PolicyReason::InvalidConfiguration, "infinite target" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.targetNits = 100.0;
++		expectStopped( input, PolicyReason::InvalidConfiguration, "target below SDR reference" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.targetNits = 651.0;
++		expectStopped( input, PolicyReason::InvalidConfiguration, "target above calibrated peak" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.calibratedOutputPeakNits = std::numeric_limits<double>::infinity();
++		expectStopped( input, PolicyReason::InvalidConfiguration, "infinite calibrated peak" );
++	}
++
++	{
++		PolicyInput input = validInput();
++		input.activeLayerCount = 3;
++		input.layers[0] = { true, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB };
++		input.layers[1] = { false, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB };
++		input.layers[2] = { false, GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR };
++		const PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
++		check( result.layerMask == 0x1u, "SDR base selected while overlay and cursor bypass" );
++		check( result.reason == PolicyReason::Enabled, "eligible SDR reason" );
++		check( result.requiresComposition(), "eligible SDR requires composition" );
++	}
++
++	for ( const GamescopeAppTextureColorspace colorspace : {
++			GAMESCOPE_APP_TEXTURE_COLORSPACE_SCRGB,
++			GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ,
++			GAMESCOPE_APP_TEXTURE_COLORSPACE_PASSTHRU } )
++	{
++		PolicyInput input = validInput();
++		input.layers[0].colorspace = colorspace;
++		expectStopped( input, PolicyReason::NoEligibleLayers, "HDR or passthrough input bypass" );
++	}
++
++	{
++		PolicyInput input = validInput();
++		input.activeLayerCount = 6;
++		input.layers[0] = { true, GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR };
++		input.layers[1] = { false, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB };
++		input.layers[2] = { true, GAMESCOPE_APP_TEXTURE_COLORSPACE_HDR10_PQ };
++		input.layers[3] = { true, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB };
++		input.layers[4] = { true, static_cast<GamescopeAppTextureColorspace>( 99 ) };
++		input.layers[5] = { false, GAMESCOPE_APP_TEXTURE_COLORSPACE_LINEAR };
++		const PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
++		check( result.layerMask == 0x9u, "only explicit SDR scene candidates selected" );
++		check( result.reason == PolicyReason::Enabled, "mixed layer reason" );
++		check( ( result.layerMask >> input.activeLayerCount ) == 0u, "mask bounded by active layers" );
++	}
++
++	{
++		PolicyInput input = validInput();
++		input.activeLayerCount = 32;
++		for ( uint32_t i = 0; i < input.activeLayerCount; i++ )
++			input.layers[i] = { true, GAMESCOPE_APP_TEXTURE_COLORSPACE_SRGB };
++		const PolicyResult result = gamescope::autohdr::evaluatePolicy( input );
++		check( result.layerMask == std::numeric_limits<uint32_t>::max(), "all 32 active layers represented" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.activeLayerCount = 0;
++		expectStopped( input, PolicyReason::InvalidLayerCount, "zero active layers" );
++	}
++	{
++		PolicyInput input = validInput();
++		input.activeLayerCount = 33;
++		expectStopped( input, PolicyReason::InvalidLayerCount, "more than 32 active layers" );
++	}
++
++	check( static_cast<uint8_t>( PolicyReason::Enabled ) == 0, "stable Enabled reason value" );
++	check( static_cast<uint8_t>( PolicyReason::NoEligibleLayers ) == 9, "stable NoEligibleLayers reason value" );
++
++	constexpr std::array reasonNames = {
++		std::pair{ PolicyReason::Enabled, std::string_view{ "enabled" } },
++		std::pair{ PolicyReason::RequestDisabled, std::string_view{ "request-disabled" } },
++		std::pair{ PolicyReason::HDROutputInactive, std::string_view{ "hdr-output-inactive" } },
++		std::pair{ PolicyReason::OutputUnqualified, std::string_view{ "output-unqualified" } },
++		std::pair{ PolicyReason::CalibrationUnavailable, std::string_view{ "calibration-unavailable" } },
++		std::pair{ PolicyReason::ColorManagementNotReady, std::string_view{ "color-management-not-ready" } },
++		std::pair{ PolicyReason::SteamOrSystemUIFocused, std::string_view{ "steam-or-system-ui-focused" } },
++		std::pair{ PolicyReason::InvalidLayerCount, std::string_view{ "invalid-layer-count" } },
++		std::pair{ PolicyReason::InvalidConfiguration, std::string_view{ "invalid-configuration" } },
++		std::pair{ PolicyReason::NoEligibleLayers, std::string_view{ "no-eligible-layers" } },
++	};
++	for ( const auto &[reason, name] : reasonNames )
++		check( gamescope::autohdr::policyReasonName( reason ) == name, "policy reason name" );
++	check( gamescope::autohdr::policyReasonName( static_cast<PolicyReason>( 255 ) ) == "unknown",
++		"unknown policy reason name" );
++
++	if ( failures != 0 )
++		return EXIT_FAILURE;
++	std::cout << "Auto HDR policy tests passed\n";
++	return EXIT_SUCCESS;
++}
+diff --git a/tests/test_auto_hdr_root_properties.cpp b/tests/test_auto_hdr_root_properties.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..cea98131b0956ce802f296ed00fdc5d5cddbc665
+--- /dev/null
++++ b/tests/test_auto_hdr_root_properties.cpp
+@@ -0,0 +1,52 @@
++// SPDX-License-Identifier: BSD-2-Clause
++
++#include "AutoHDRRootProperties.h"
++
++#include <cstdlib>
++#include <iostream>
++#include <string_view>
++
++namespace
++{
++	int failures = 0;
++
++	void check( bool condition, std::string_view message )
++	{
++		if ( condition )
++			return;
++		std::cerr << "FAIL: " << message << '\n';
++		failures++;
++	}
++}
++
++int main()
++{
++	using namespace gamescope::autohdr;
++
++	check( SupportedAtomName == "GAMESCOPE_HDR_ITM_SUPPORTED", "support atom name" );
++	check( EnableAtomName == "GAMESCOPE_HDR_ITM_ENABLE", "enable atom name" );
++	check( ActiveFeedbackAtomName == "GAMESCOPE_AUTO_HDR_ACTIVE_FEEDBACK", "active feedback atom name" );
++
++	const RootPropertyValues disabled = initialRootPropertyValues( false );
++	check( disabled.supported == 1u, "support is always published" );
++	check( disabled.enabled == 0u, "disabled launch publishes disabled state" );
++	check( disabled.active == 0u, "launch feedback is inactive" );
++
++	const RootPropertyValues enabled = initialRootPropertyValues( true );
++	check( enabled.supported == 1u, "enabled launch still publishes support" );
++	check( enabled.enabled == 1u, "enabled launch publishes enabled state" );
++	check( enabled.active == 0u, "enabled launch is inactive without an eligible layer" );
++	check( !activeFromLayerMask( 0u ), "zero effective layer mask is inactive" );
++	check( activeFromLayerMask( 0x00000001u ), "first effective layer is active" );
++	check( activeFromLayerMask( 0x80000000u ), "highest effective layer is active" );
++
++	check( !presentationWantsHDR( false, false ), "SDR presentation has no HDR badge" );
++	check( presentationWantsHDR( true, false ), "native HDR presentation has HDR badge" );
++	check( presentationWantsHDR( false, true ), "Auto HDR presentation has HDR badge" );
++	check( presentationWantsHDR( true, true ), "combined HDR presentation has HDR badge" );
++
++	if ( failures != 0 )
++		return EXIT_FAILURE;
++	std::cout << "Auto HDR root property tests passed\n";
++	return EXIT_SUCCESS;
++}

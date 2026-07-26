@@ -1,0 +1,36 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Wed, 22 Jul 2026 00:00:00 -0400
+Subject: [PATCH] drm/msm/dpu: enable 8bpc dither on AYN Odin 3
+
+The tested Odin 3 display path uses 8-bpc output, so the existing DPU helper
+disables output dithering. Enable the same static ordered dither matrix for
+8-bpc output on this machine only. Keep temporal dithering disabled and
+preserve the existing 6-bpc and disable paths everywhere else.
+
+This isolated downstream change makes no RGB101010, panel descriptor, DSI, or
+DSC changes. It is not a claim that every 8-bpc panel should enable DPU
+dithering.
+
+Signed-off-by: enjihn <150061999+enjihn@users.noreply.github.com>
+---
+ drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c | 12 ++++++++++++
+ 1 file changed, 12 insertions(+)
+
+diff --git a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+--- a/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
++++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_encoder.c
+@@ -12,0 +13 @@
++#include <linux/of.h>
+@@ -403,0 +405,11 @@ static void _dpu_encoder_setup_dither(struct dpu_hw_pingpong *hw_pp, unsigned bp
++	case 8:
++		if (!of_machine_is_compatible("ayn,odin3")) {
++			hw_pp->ops.setup_dither(hw_pp, NULL);
++			return;
++		}
++		dither_cfg.c0_bitdepth = 8;
++		dither_cfg.c1_bitdepth = 8;
++		dither_cfg.c2_bitdepth = 8;
++		dither_cfg.c3_bitdepth = 8;
++		dither_cfg.temporal_en = 0;
++		break;

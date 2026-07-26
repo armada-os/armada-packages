@@ -1,0 +1,299 @@
+From aa4f2a1378c1bb77d8d75c47e7cde03d0635f6ab Mon Sep 17 00:00:00 2001
+From: enjihn <150061999+enjihn@users.noreply.github.com>
+Date: Fri, 24 Jul 2026 16:55:07 -0400
+Subject: [PATCH] autohdr: protect saturated colors and near black
+
+---
+ src/AutoHDRColor.cpp          |  53 +++++++++++++--
+ src/AutoHDRColor.h            |   1 +
+ src/shaders/colorimetry.h     |  45 ++++++++++++-
+ tests/test_auto_hdr_color.cpp | 120 ++++++++++++++++++++++++++++++++++
+ 4 files changed, 214 insertions(+), 5 deletions(-)
+
+diff --git a/src/AutoHDRColor.cpp b/src/AutoHDRColor.cpp
+index bd01d74a..ab8b5711 100644
+--- a/src/AutoHDRColor.cpp
++++ b/src/AutoHDRColor.cpp
+@@ -129,6 +129,54 @@ namespace gamescope::autohdr
+ 		return bounded( scRGB, 10000.0 / kScRGBLightScale ) * kScRGBLightScale;
+ 	}
+ 
++	RGB compressBT2020ChromaToGamut( const RGB &linearNits, double targetNits )
++	{
++		// This protects the validated BT.2020 channel box after inverse tone
++		// mapping. It is not panel-gamut-aware; the output LUT remains
++		// responsible for conversion to the physical panel gamut.
++		if ( !std::isfinite( targetNits ) || targetNits < 0.0 || !finite( linearNits ) )
++			return RGB{};
++
++		if ( linearNits.r >= 0.0 && linearNits.r <= targetNits &&
++			linearNits.g >= 0.0 && linearNits.g <= targetNits &&
++			linearNits.b >= 0.0 && linearNits.b <= targetNits )
++			return linearNits;
++
++		const double luminance =
++			kBT2020R * linearNits.r + kBT2020G * linearNits.g + kBT2020B * linearNits.b;
++		if ( !std::isfinite( luminance ) || luminance < 0.0 || luminance > targetNits )
++			return bounded( linearNits, targetNits );
++
++		const RGB direction = {
++			linearNits.r - luminance,
++			linearNits.g - luminance,
++			linearNits.b - luminance,
++		};
++		double chromaScale = 1.0;
++		const auto constrain = [&]( double component )
++		{
++			if ( component > 0.0 )
++				chromaScale = std::min( chromaScale, ( targetNits - luminance ) / component );
++			else if ( component < 0.0 )
++				chromaScale = std::min( chromaScale, -luminance / component );
++		};
++		constrain( direction.r );
++		constrain( direction.g );
++		constrain( direction.b );
++
++		if ( !std::isfinite( chromaScale ) )
++			return bounded( linearNits, targetNits );
++		chromaScale = std::clamp( chromaScale, 0.0, 1.0 );
++		const RGB compressed = {
++			luminance + chromaScale * direction.r,
++			luminance + chromaScale * direction.g,
++			luminance + chromaScale * direction.b,
++		};
++		return finite( compressed )
++			? bounded( compressed, targetNits )
++			: bounded( linearNits, targetNits );
++	}
++
+ 	std::optional<RGB> efficientInverseToneMap( const RGB &linearRec2020, const Config &config )
+ 	{
+ 		// Independently derived slope-limited selective-highlight curve. A
+@@ -178,10 +226,7 @@ namespace gamescope::autohdr
+ 		RGB mapped = { color.r * scale, color.g * scale, color.b * scale };
+ 		const double maxChannel = std::max( { mapped.r, mapped.g, mapped.b } );
+ 		if ( maxChannel > config.targetNits )
+-		{
+-			const double peakScale = config.targetNits / maxChannel;
+-			mapped = { mapped.r * peakScale, mapped.g * peakScale, mapped.b * peakScale };
+-		}
++			mapped = compressBT2020ChromaToGamut( mapped, config.targetNits );
+ 
+ 		return finite( mapped ) ? std::optional<RGB>{ bounded( mapped, config.targetNits ) } : std::nullopt;
+ 	}
+diff --git a/src/AutoHDRColor.h b/src/AutoHDRColor.h
+index 556020ac..afcf268b 100644
+--- a/src/AutoHDRColor.h
++++ b/src/AutoHDRColor.h
+@@ -53,6 +53,7 @@ namespace gamescope::autohdr
+ 	double nitsToScRGB( double nits );
+ 	double scRGBToNits( double scRGB );
+ 
++	RGB compressBT2020ChromaToGamut( const RGB &linearNits, double targetNits );
+ 	std::optional<RGB> efficientInverseToneMap( const RGB &linearRec2020, const Config &config );
+ 	std::optional<RGBA> convertSRGBToHDRNits( const RGBA &encodedSource, const Config &config,
+ 		const LinearTransform &sourceToRec2020 );
+diff --git a/src/shaders/colorimetry.h b/src/shaders/colorimetry.h
+index 7fd59b79..a83fa57e 100644
+--- a/src/shaders/colorimetry.h
++++ b/src/shaders/colorimetry.h
+@@ -186,6 +186,49 @@ bool finite_color(vec3 color)
+     return !any(isnan(color)) && !any(isinf(color));
+ }
+ 
++vec3 compress_bt2020_chroma_to_gamut(vec3 linear_nits, float target_nits)
++{
++    const vec3 k_bt2020 = vec3(0.262698338956556, 0.678008765772817, 0.0592928952706273);
++
++    // Protect the validated BT.2020 channel box after inverse tone mapping.
++    // The output LUT, not this helper, converts into the physical panel gamut.
++    if (isnan(target_nits) || isinf(target_nits) ||
++        target_nits < 0.0f || !finite_color(linear_nits))
++        return vec3(0.0f);
++
++    if (all(greaterThanEqual(linear_nits, vec3(0.0f))) &&
++        all(lessThanEqual(linear_nits, vec3(target_nits))))
++        return linear_nits;
++
++    const float luminance = dot(linear_nits, k_bt2020);
++    if (isnan(luminance) || isinf(luminance) ||
++        luminance < 0.0f || luminance > target_nits)
++        return bounded_color(linear_nits, target_nits);
++
++    const vec3 direction = linear_nits - vec3(luminance);
++    float chroma_scale = 1.0f;
++    if (direction.r > 0.0f)
++        chroma_scale = min(chroma_scale, (target_nits - luminance) / direction.r);
++    else if (direction.r < 0.0f)
++        chroma_scale = min(chroma_scale, -luminance / direction.r);
++    if (direction.g > 0.0f)
++        chroma_scale = min(chroma_scale, (target_nits - luminance) / direction.g);
++    else if (direction.g < 0.0f)
++        chroma_scale = min(chroma_scale, -luminance / direction.g);
++    if (direction.b > 0.0f)
++        chroma_scale = min(chroma_scale, (target_nits - luminance) / direction.b);
++    else if (direction.b < 0.0f)
++        chroma_scale = min(chroma_scale, -luminance / direction.b);
++
++    if (isnan(chroma_scale) || isinf(chroma_scale))
++        return bounded_color(linear_nits, target_nits);
++    chroma_scale = clamp(chroma_scale, 0.0f, 1.0f);
++    const vec3 compressed = vec3(luminance) + chroma_scale * direction;
++    return finite_color(compressed)
++        ? bounded_color(compressed, target_nits)
++        : bounded_color(linear_nits, target_nits);
++}
++
+ // Independently derived slope-limited selective-highlight curve. A
+ // five-percent derivative ramp makes both joins C2 while bounding the output
+ // slope to ten times the SDR reference. The converted-content ceiling remains
+@@ -248,7 +291,7 @@ vec3 efficient_inverse_tonemapping(
+     vec3 mapped = color * (mapped_luminance / luminance);
+     const float max_channel = max(mapped.r, max(mapped.g, mapped.b));
+     if (max_channel > target_nits)
+-        mapped *= target_nits / max_channel;
++        mapped = compress_bt2020_chroma_to_gamut(mapped, target_nits);
+ 
+     return finite_color(mapped) ? bounded_color(mapped, target_nits) : vec3(0.0f);
+ }
+diff --git a/tests/test_auto_hdr_color.cpp b/tests/test_auto_hdr_color.cpp
+index e4693597..29d0ddd3 100644
+--- a/tests/test_auto_hdr_color.cpp
++++ b/tests/test_auto_hdr_color.cpp
+@@ -160,6 +160,100 @@ int main()
+ 		"infinite content ceiling rejected" );
+ 	check( !efficientInverseToneMap( { 1.0, 1.0, 1.0 }, { 0.0, 650.0 } ), "invalid config fails closed" );
+ 
++	// This helper protects the post-ITM BT.2020 channel box. These tests do not
++	// claim physical-panel gamut mapping, which remains the output LUT's job.
++	constexpr double gamutTarget = 650.0;
++	const std::array<RGB, 5> inGamutSamples = {{
++		{ 0.0, 0.0, 0.0 },
++		{ gamutTarget, gamutTarget, gamutTarget },
++		{ 100.0, 200.0, 300.0 },
++		{ 650.0, 0.0, 650.0 },
++		{ 0.0, 650.0, 0.0 },
++	}};
++	for ( const RGB &sample : inGamutSamples )
++	{
++		const RGB compressed = compressBT2020ChromaToGamut( sample, gamutTarget );
++		near( compressed.r, sample.r, 0.0, "in-range gamut helper red identity" );
++		near( compressed.g, sample.g, 0.0, "in-range gamut helper green identity" );
++		near( compressed.b, sample.b, 0.0, "in-range gamut helper blue identity" );
++	}
++
++	const RGB saturatedOutside{ 900.0, 200.0, 0.0 };
++	const RGB saturatedCompressed =
++		compressBT2020ChromaToGamut( saturatedOutside, gamutTarget );
++	check( finiteAndBounded( saturatedCompressed, gamutTarget ),
++		"saturated boundary compression is finite and bounded" );
++	near( bt2020Luminance( saturatedCompressed ), bt2020Luminance( saturatedOutside ), 1e-10,
++		"saturated boundary compression preserves BT.2020 luminance" );
++	near( saturatedCompressed.r, gamutTarget, 1e-12,
++		"saturated boundary compression uses the nearest channel boundary" );
++
++	for ( int r = -2; r <= 4; r++ )
++		for ( int g = -2; g <= 4; g++ )
++			for ( int b = -2; b <= 4; b++ )
++			{
++				const RGB sample{
++					r * gamutTarget / 2.0,
++					g * gamutTarget / 2.0,
++					b * gamutTarget / 2.0,
++				};
++				const double inputLuminance = bt2020Luminance( sample );
++				if ( inputLuminance < 0.0 || inputLuminance > gamutTarget )
++					continue;
++				const RGB compressed = compressBT2020ChromaToGamut( sample, gamutTarget );
++				check( finiteAndBounded( compressed, gamutTarget ),
++					"dense saturated boundary sample is finite and bounded" );
++				near( bt2020Luminance( compressed ), inputLuminance, 5e-10,
++					"dense saturated boundary sample preserves BT.2020 luminance" );
++				if ( !finiteAndBounded( sample, gamutTarget ) )
++				{
++					const bool reachesBoundary =
++						compressed.r <= 1e-10 || compressed.r >= gamutTarget - 1e-10 ||
++						compressed.g <= 1e-10 || compressed.g >= gamutTarget - 1e-10 ||
++						compressed.b <= 1e-10 || compressed.b >= gamutTarget - 1e-10;
++					check( reachesBoundary, "dense compression changes chroma only as much as required" );
++				}
++			}
++
++	const RGB exactBlack = compressBT2020ChromaToGamut( { 0.0, 0.0, 0.0 }, gamutTarget );
++	near( exactBlack.r, 0.0, 0.0, "gamut helper exact black red" );
++	near( exactBlack.g, 0.0, 0.0, "gamut helper exact black green" );
++	near( exactBlack.b, 0.0, 0.0, "gamut helper exact black blue" );
++	const RGB neutral = compressBT2020ChromaToGamut( { 325.0, 325.0, 325.0 }, gamutTarget );
++	near( neutral.r, 325.0, 0.0, "gamut helper neutral red" );
++	near( neutral.g, 325.0, 0.0, "gamut helper neutral green" );
++	near( neutral.b, 325.0, 0.0, "gamut helper neutral blue" );
++
++	const double nan = std::numeric_limits<double>::quiet_NaN();
++	const double infinity = std::numeric_limits<double>::infinity();
++	for ( const RGB hostile : {
++		RGB{ nan, 1.0, 2.0 },
++		RGB{ infinity, 1.0, 2.0 },
++		RGB{ -infinity, 1.0, 2.0 },
++	} )
++	{
++		const RGB safe = compressBT2020ChromaToGamut( hostile, gamutTarget );
++		check( finiteAndBounded( safe, gamutTarget ), "nonfinite gamut input fails safely" );
++	}
++	const RGB negativeIntermediate =
++		compressBT2020ChromaToGamut( { -100.0, 400.0, 400.0 }, gamutTarget );
++	check( finiteAndBounded( negativeIntermediate, gamutTarget ),
++		"negative channel intermediate is compressed safely" );
++	near( bt2020Luminance( negativeIntermediate ),
++		bt2020Luminance( { -100.0, 400.0, 400.0 } ), 1e-10,
++		"negative channel intermediate preserves feasible luminance" );
++	const RGB outOfRangeLuma =
++		compressBT2020ChromaToGamut( { 800.0, 800.0, 800.0 }, gamutTarget );
++	check( finiteAndBounded( outOfRangeLuma, gamutTarget ),
++		"out-of-range neutral luminance falls back safely" );
++	near( outOfRangeLuma.r, gamutTarget, 0.0, "out-of-range neutral red bounded" );
++	const RGB zeroDirection =
++		compressBT2020ChromaToGamut( { 123.0, 123.0, 123.0 }, gamutTarget );
++	near( zeroDirection.r, 123.0, 0.0, "zero chroma direction remains stable" );
++	check( finiteAndBounded(
++		compressBT2020ChromaToGamut( saturatedOutside, nan ), 0.0 ),
++		"nonfinite gamut target fails safely" );
++
+ 	const Config odinConfig{ 203.0, 650.0, 550.0 };
+ 	const CurveParameters odinCurve = curveParameters( odinConfig );
+ 	near( odinCurve.contentNits, 550.0, 0.0, "Odin converted-content ceiling" );
+@@ -248,6 +342,32 @@ int main()
+ 			previous = output->r;
+ 		}
+ 
++		for ( const RGB ray : {
++			RGB{ 1.0, 0.0, 0.0 },
++			RGB{ 0.0, 1.0, 0.0 },
++			RGB{ 0.0, 0.0, 1.0 },
++			RGB{ 1.0, 0.5, 0.125 },
++		} )
++		{
++			RGB previousNearBlack{};
++			for ( int step = 0; step <= 4096; step++ )
++			{
++				const double level = step / ( 4096.0 * 64.0 );
++				const auto output = efficientInverseToneMap(
++					{ ray.r * level, ray.g * level, ray.b * level }, config );
++				check( output.has_value(), "near-black chromatic conversion accepted" );
++				if ( !output )
++					continue;
++				check( finiteAndBounded( *output, config.targetNits ),
++					"near-black chromatic output finite and bounded" );
++				check( output->r + 1e-14 >= previousNearBlack.r &&
++						output->g + 1e-14 >= previousNearBlack.g &&
++						output->b + 1e-14 >= previousNearBlack.b,
++					"near-black chromatic ray is channel-monotonic" );
++				previousNearBlack = *output;
++			}
++		}
++
+ 		const CurveParameters parameters = curveParameters( config );
+ 		const double maximumSlope = 10.0 * config.sdrNits;
+ 		for ( int step = 0; step <= 4096; step++ )
+-- 
+2.51.0.windows.2
+
