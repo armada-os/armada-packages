@@ -7,7 +7,7 @@ From: virtudude <virtudude@protonmail.com>
  	};
  
 -	/* Backlight */
-+	/* secondary panel backlight (disabled with &mdss_dsi1) */
++	/* secondary panel backlight disabled; userspace currently uses panel init without kernel brightness */
  	backlight: backlight@2e {
  		compatible = "silergy,sy7758";
  		reg = <0x2e>;
@@ -20,7 +20,7 @@ From: virtudude <virtudude@protonmail.com>
  	clock-frequency = <400000>;
  	status = "okay";
  
-+	/* secondary digitizer (disabled with &mdss_dsi1) */
++	/* secondary digitizer left disabled until Goodix resume path is validated */
  	touchscreen@5d {
  		reg = <0x5d>;
  		compatible = "goodix,gt911";
@@ -28,22 +28,11 @@ From: virtudude <virtudude@protonmail.com>
  
  		interrupt-parent = <&tlmm>;
  		interrupts = <39 IRQ_TYPE_EDGE_FALLING>;
-@@ -214,9 +216,10 @@
- 	};
- };
+@@ -228,7 +230,6 @@
+ 		enable-gpio = <&tca6408 0 GPIO_ACTIVE_HIGH>;
+ 		reset-gpios = <&tca6408 2 GPIO_ACTIVE_LOW>;
+ 		rotation = <270>;
+-		backlight = <&backlight>;
  
-+/* secondary panel disabled; armada drives only the primary */
- &mdss_dsi1 {
- 	vdda-supply = <&vreg_l3e_1p2>;
--	status = "okay";
-+	status = "disabled";
- 
- 	panel@0 {
- 		compatible = "ayaneo,pocket-ds-secondary-panel";
-@@ -245,5 +248,5 @@
- 
- &mdss_dsi1_phy {
- 	vdds-supply = <&vreg_l1e_0p88>;
--	status = "okay";
-+	status = "disabled";
- };
+ 		port {
+ 			panel1_in: endpoint {
