@@ -109,7 +109,8 @@ CONFIG_BACKLIGHT_QCOM_WLED=y
 # ============== Display panels ==============
 CONFIG_DRM_PANEL_AR06_4INCH=y               # AYANEO Pocket ACE
 CONFIG_DRM_PANEL_AR02_3INCH=y               # AYANEO Pocket DMG
-CONFIG_DRM_PANEL_AR11_5INCH=y               # AYANEO Pocket DS (lower panel)
+# CONFIG_DRM_PANEL_AR11_5INCH is not set          # superseded by ST7703 for AYANEO Pocket DS lower panel
+CONFIG_DRM_PANEL_SITRONIX_ST7703=y         # AYANEO Pocket DS lower panel
 CONFIG_DRM_PANEL_CHIPONE_ICNA35XX=y         # AYANEO Pocket EVO + Odin 2 Portal
 CONFIG_DRM_PANEL_DDIC_CH13726A=y            # AYANEO Pocket S2K
 CONFIG_DRM_PANEL_VISIONOX_VTDR6130_COG=y    # Retroid Pocket 6
