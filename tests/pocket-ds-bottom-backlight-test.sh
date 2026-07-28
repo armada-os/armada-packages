@@ -8,6 +8,8 @@ set -euo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 DTS="$ROOT/kernel/dts/qcs8550-ayaneo-pocketds.dts"
 PANEL_PATCH="$ROOT/kernel/patches/0053-gpu-panel-add-Pocket-DS-lower-panel-driver.patch"
+SY7758_PATCH="$ROOT/kernel/patches/0060-backlight-Add-SY7758-LED-driver.patch"
+SY7758_BINDING="$ROOT/kernel/patches/0060-dt-bindings-silergy-sy7758.patch"
 CONFIG="$ROOT/kernel/config/armada-kernel.config.overrides"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -34,6 +36,10 @@ static_checks() {
     || fail 'ST7703 panel patch must register AYANEO Pocket DS lower compatible'
   grep -q 'ayaneo_pocket_ds_lower_init_sequence' "$PANEL_PATCH" \
     || fail 'ST7703 patch must carry the Pocket DS lower panel init sequence'
+  grep -q 'devm_gpiod_get_optional(dev, "enable", GPIOD_OUT_HIGH)' "$SY7758_PATCH" \
+    || fail 'SY7758 driver must tolerate Pocket DS boards without a separate enable GPIO'
+  ! grep -A5 '^+required:' "$SY7758_BINDING" | grep -q 'enable-gpios' \
+    || fail 'SY7758 binding must not require enable-gpios for Pocket DS-compatible wiring'
 
   printf 'Pocket DS bottom-backlight static checks passed\n'
 }

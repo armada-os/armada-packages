@@ -10,15 +10,15 @@ Reviewed-by: Krzysztof Kozlowski <krzysztof.kozlowski@oss.qualcomm.com>
 Signed-off-by: Neil Armstrong <neil.armstrong@linaro.org>
 Reviewed-by: Daniel Thompson (RISCstar) <danielt@kernel.org>
 ---
- .../bindings/leds/backlight/silergy,sy7758.yaml    | 52 ++++++++++++++++++++++
- 1 file changed, 52 insertions(+)
+ .../bindings/leds/backlight/silergy,sy7758.yaml    | 51 ++++++++++++++++++++++
+ 1 file changed, 51 insertions(+)
 
 diff --git a/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml b/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml
 new file mode 100644
 index 000000000000..64af6b34641a
 --- /dev/null
 +++ b/Documentation/devicetree/bindings/leds/backlight/silergy,sy7758.yaml
-@@ -0,0 +1,52 @@
+@@ -0,0 +1,51 @@
 +# SPDX-License-Identifier: (GPL-2.0 OR BSD-2-Clause)
 +%YAML 1.2
 +---
@@ -52,7 +52,6 @@ index 000000000000..64af6b34641a
 +required:
 +  - compatible
 +  - reg
-+  - enable-gpios
 +
 +unevaluatedProperties: false
 +
