@@ -68,6 +68,7 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8550/patches/linux/0053-edt-ft5x06-add-no_regmap_bulk_read-option.patch
 - `patches/0053-gpu-panel-add-Pocket-DS-lower-panel-driver.patch`
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8550/patches/linux/0053-gpu-panel-add-Pocket-DS-lower-panel-driver.patch
+  notes: modified — replaces the generated AR11 driver with Azkali/Fedora DS ST7703 lower-panel support.
 - `patches/0054_sn3112-pwm-driver.patch`
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8550/patches/linux/0054_sn3112-pwm-driver.patch
 - `patches/0055_Synaptics-TD4328-LCD-panel.patch`
@@ -257,6 +258,9 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
 - `dts/qcs8550-ayaneo-pockets2k.dts.patch`
   source: armada
   notes: edits dts/qcs8550-ayaneo-pockets2k.dts
+- `dts/qcs8550-ayaneo-pocketds.dts.patch`
+  source: armada
+  notes: edits dts/qcs8550-ayaneo-pocketds.dts; lower-panel power/backlight wiring follows the Azkali/Fedora DS ST7703/iovcc model on top of the ROCKNIX Pocket DS DTS.
 - `dts/qcs8550-ayn-common.dtsi.patch`
   source: armada
   notes: edits dts/qcs8550-ayn-common.dtsi

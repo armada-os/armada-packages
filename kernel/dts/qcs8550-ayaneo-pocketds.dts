@@ -39,21 +39,6 @@
 		enable-active-high;
 	};
 
-	/*
-	 * The lower panel's ST7703 IOVCC rail is switched by an expander
-	 * GPIO; the mainline panel driver models it as a plain iovcc supply,
-	 * so wrap the enable line in a fixed regulator. The rail is modeled at
-	 * the ST7703 IOVCC nominal level used by the lower-panel path.
-	 */
-	vreg_panel1_iovcc: regulator-panel1-iovcc {
-		compatible = "regulator-fixed";
-		regulator-name = "panel1-iovcc";
-		regulator-min-microvolt = <1800000>;
-		regulator-max-microvolt = <1800000>;
-		gpio = <&tca6408 0 GPIO_ACTIVE_HIGH>;
-		enable-active-high;
-	};
-
 };
 
 &tlmm {
@@ -234,13 +219,13 @@
 	status = "okay";
 
 	panel@0 {
-		compatible = "ayaneo,pocket-ds-lower-panel";
+		compatible = "ayaneo,pocket-ds-secondary-panel";
 		reg = <0>;
 		pinctrl-0 = <&sde_dsi1_active>;
 		pinctrl-1 = <&sde_dsi1_suspend>;
 		pinctrl-names = "default", "sleep";
-		vcc-supply = <&sgm3804>;
-		iovcc-supply = <&vreg_panel1_iovcc>;
+		avdd-supply = <&sgm3804>;
+		enable-gpio = <&tca6408 0 GPIO_ACTIVE_HIGH>;
 		reset-gpios = <&tca6408 2 GPIO_ACTIVE_LOW>;
 		rotation = <270>;
 		backlight = <&backlight>;
