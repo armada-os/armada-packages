@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Armada contributors <noreply@localhost>
+Date: Thu, 30 Jul 2026 00:00:00 +0000
+Subject: [PATCH] cpufreq: qcom: expose turbo LUT rows as boost OPPs
+
+Some Qualcomm EPSS LUTs contain one or more single-core turbo rows marked
+with LUT_TURBO_IND. The current qcom-cpufreq-hw logic marks those rows
+invalid while scanning the LUT, then only restores the final duplicate row
+as CPUFREQ_BOOST_FREQ during duplicate/end-of-table handling.
+
+That loses earlier valid turbo rows. If the final turbo row is not present
+in the DT OPP table, no boost frequency is exposed even when lower turbo
+rows are valid.
+
+Validate each non-duplicate turbo row while scanning the LUT and expose it
+as CPUFREQ_BOOST_FREQ when OPP setup succeeds. Keep duplicate terminal rows
+invalid so the existing duplicate/end-of-table detection still terminates
+the table.
+
+Some firmware exposes a top turbo row in hardware before the corresponding
+DT OPP exists. Keep that path off by default, but add an opt-in
+qcom_cpufreq_hw.allow_missing_turbo_opp parameter that registers the
+LUT-provided freq/volt pair as a dynamic boost OPP when the DT lookup fails
+with -ENODEV. This is intended for validated systems only; cpufreq boost
+still remains disabled by default.
+
+Link: https://github.com/virtudude/armada/issues/173
+---
+ drivers/cpufreq/qcom-cpufreq-hw.c | 61 ++++++++++++++++++++++++++++++-
+ 1 file changed, 60 insertions(+), 1 deletion(-)
+
+diff -urN a/drivers/cpufreq/qcom-cpufreq-hw.c b/drivers/cpufreq/qcom-cpufreq-hw.c
+--- a/drivers/cpufreq/qcom-cpufreq-hw.c	2026-06-01 15:54:55.000000000 +0000
++++ b/drivers/cpufreq/qcom-cpufreq-hw.c	2026-07-30 14:39:39.057578057 +0000
+@@ -68,6 +68,10 @@
+ 
+ static unsigned long cpu_hw_rate, xo_rate;
+ static bool icc_scaling_enabled;
++static bool allow_missing_turbo_opp;
++module_param_named(allow_missing_turbo_opp, allow_missing_turbo_opp, bool, 0644);
++MODULE_PARM_DESC(allow_missing_turbo_opp,
++		 "Allow LUT turbo rows missing from DT OPP tables to be registered as boost OPPs");
+ 
+ static int qcom_cpufreq_set_bw(struct cpufreq_policy *policy,
+ 			       unsigned long freq_khz)
+@@ -110,6 +114,20 @@
+ 	return dev_pm_opp_enable(cpu_dev, freq_hz);
+ }
+ 
++static int qcom_cpufreq_add_lut_opp(struct device *cpu_dev,
++				    unsigned long freq_khz,
++				    unsigned long volt)
++{
++	unsigned long freq_hz = freq_khz * 1000;
++	int ret;
++
++	ret = dev_pm_opp_add(cpu_dev, freq_hz, volt);
++	if (ret && ret != -EEXIST)
++		return ret;
++
++	return dev_pm_opp_enable(cpu_dev, freq_hz);
++}
++
+ static int qcom_cpufreq_hw_target_index(struct cpufreq_policy *policy,
+ 					unsigned int index)
+ {
+@@ -207,7 +225,7 @@
+ 	struct cpufreq_frequency_table	*table;
+ 	struct dev_pm_opp *opp;
+ 	unsigned long rate;
+-	int ret;
++	int ret, opp_ret;
+ 	struct qcom_cpufreq_data *drv_data = policy->driver_data;
+ 	const struct qcom_cpufreq_soc_data *soc_data = qcom_cpufreq.soc_data;
+ 
+@@ -263,7 +281,30 @@
+ 			}
+ 
+ 		} else if (core_count == LUT_TURBO_IND) {
+-			table[i].frequency = CPUFREQ_ENTRY_INVALID;
++			if (freq != prev_freq) {
++				opp_ret = qcom_cpufreq_update_opp(cpu_dev, freq, volt);
++				if (opp_ret == -ENODEV && allow_missing_turbo_opp) {
++					dev_info(cpu_dev,
++						 "adding missing turbo OPP from LUT freq=%u volt=%u\n",
++						 freq, volt);
++					opp_ret = qcom_cpufreq_add_lut_opp(cpu_dev, freq, volt);
++				}
++
++				if (!opp_ret) {
++					table[i].frequency = freq;
++					table[i].flags = CPUFREQ_BOOST_FREQ;
++					dev_dbg(cpu_dev,
++						 "index=%d boost freq=%d, core_count %d\n",
++						 i, freq, core_count);
++				} else {
++					dev_warn(cpu_dev,
++						 "failed to update boost OPP for freq=%d ret=%d\n",
++						 freq, opp_ret);
++					table[i].frequency = CPUFREQ_ENTRY_INVALID;
++				}
++			} else {
++				table[i].frequency = CPUFREQ_ENTRY_INVALID;
++			}
+ 		}
+ 
+ 		/*

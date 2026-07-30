@@ -132,6 +132,11 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8750/patches/linux/0504-wakeup-qcom-ipcc-remove-IRQF-NO-SUSPEND.patch
 - `patches/0505-msm_gem-lock-before-put_iova_spaces.patch`
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8250/patches/linux/0505-msm_gem-lock-before-put_iova_spaces.patch
+- `patches/0901-cpufreq-qcom-expose-turbo-lut-rows.patch`
+  source: armada
+  notes: exposes DT-backed Qualcomm EPSS turbo LUT rows as cpufreq boost;
+    missing-DT turbo OPP registration is opt-in via module parameter. See
+    `docs/qcom-cpufreq-turbo.md` and https://github.com/virtudude/armada/issues/173.
 - `patches/0506-usbcore-add-interrupt-interval-override.patch`
   source: https://github.com/ROCKNIX/distribution/blob/e485495a942daba186d4a8543e18a1ad09c9a5d5/projects/ROCKNIX/devices/SM8550/patches/linux/0506-usbcore-add-interrupt-interval-override.patch
 - `patches/0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch`
