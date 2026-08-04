@@ -69,7 +69,7 @@ EOF
     TIMESTAMP=$(TZ=UTC date +%m%d%H)
 
     sed -i \
-      -e "/^Release:/s/%?dist/${TIMESTAMP}.%{?dist}.armada/" \
+      -e "/^Release:/s/%?dist/.${TIMESTAMP}%{?dist}.armada/" \
       -e "/^%build$/i %global build_cflags %{build_cflags} ${ARMADA_MARCH}" \
       -e "/^%build$/i %global build_cxxflags %{build_cxxflags} ${ARMADA_MARCH}" \
       -e "s/^%autosetup\>/%autosetup -p1/" \
