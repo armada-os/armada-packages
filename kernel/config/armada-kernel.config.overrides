@@ -351,3 +351,14 @@ CONFIG_NETFILTER_XT_MATCH_MULTIPORT=m
 CONFIG_IP_ADVANCED_ROUTER=y
 CONFIG_IP_MULTIPLE_TABLES=y
 CONFIG_WIREGUARD=m
+
+# ============== Suspend/resume debugging ==============
+# Without these, a device that will not stay in deep suspend is undiagnosable:
+# pm_wakeup_irq names the IRQ that pulled the SoC out, and pm_test exercises the
+# device suspend callbacks without powering down. Found the SM8550 wake sources
+# with them; keeping them on so the next regression does not need a rebuild.
+CONFIG_PM_DEBUG=y
+CONFIG_PM_ADVANCED_DEBUG=y
+CONFIG_PM_SLEEP_DEBUG=y
+# /sys/kernel/debug/irq/irqs/<n> — "wdepth" shows which IRQs are armed for wake.
+CONFIG_GENERIC_IRQ_DEBUGFS=y

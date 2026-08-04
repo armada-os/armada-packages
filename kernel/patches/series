@@ -149,3 +149,24 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0074-soundwire-qcom-PCM-data-port-format-enable.patch
 0612-ROCKNIX-odin3-q6apm-start-mi2s-port-at-prepare.patch
 0613-ASoC-q6apm-scope-prepare-start-to-MI2S.patch
+
+# ============== SM8550 deep suspend (ROCKNIX PR #2954, shuuri-labs/jaewun) ==============
+# Wake sources and resume races that stop SM8550 staying in deep suspend, in the
+# upstream PR's numeric order. Two of that PR's patches are deliberately absent:
+# 0502 (qcom-ipcc IRQF_NO_SUSPEND) is already carried here as 0504, and 1004
+# (rsinput MCU suspend/resume) is for a gamepad driver the Pocket EVO does not
+# use, and 1007/1015 do not apply to 7.1.5 (commented out below). Deep suspend
+# was validated on 7.1.5 without them.
+#
+# This set is version-fragile: three of the eight broke when the kernel moved
+# from 7.0.11 to 7.1.5, and 0201 in particular tracks ufshcd_intr(), which 7.2
+# changes again by reverting the threaded IRQ handler. Expect to re-derive
+# rather than rebase on the next bump.
+0201-scsi-ufs-drain-relink-completions-out-of-band-pm.patch
+0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch
+0207-scsi-ufs-qcom-balance-irq-on-host-reset-error.patch
+1006-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch
+# 1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch  # does not apply to 7.1.5
+1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch
+1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch
+# 1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch  # does not apply to 7.1.5

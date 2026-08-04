@@ -107,3 +107,22 @@
 		};
 	};
 };
+
+/*
+ * Drop the fan tachometer interrupt.
+ *
+ * qcs8550-ayaneo-pocket-common.dtsi gives pwm-fan an edge-falling TLMM
+ * interrupt on GPIO 64 for the tacho. Measured on a Pocket EVO it fires about
+ * 80 times a second whenever the fan spins, and the SoC leaves deep suspend
+ * after 2-8s; with the fan stopped the same suspend holds for 13-92s. The AYN
+ * Odin 3, which suspends for hours, declares no tacho interrupt at all.
+ *
+ * Overridden here rather than in the shared DTSI because that file is included
+ * by six other boards whose fan wiring has not been checked.
+ *
+ * Trade-off: hwmon fan1_input stops reporting RPM, matching the Odin 3.
+ */
+&pwm_fan {
+	/delete-property/ interrupts;
+	/delete-property/ interrupt-parent;
+};
