@@ -68,6 +68,7 @@
 v6_20260210_quic_utiwari_crypto_qce_add_runtime_pm_and_interconnect_bandwidth_scaling_support.patch
 0504-wakeup-qcom-ipcc-remove-IRQF-NO-SUSPEND.patch
 0505-msm_gem-lock-before-put_iova_spaces.patch
+0901-cpufreq-qcom-expose-turbo-lut-rows.patch
 
 # ============== SM8550 DTSI prereqs (AYN common DTSI references these) ==============
 0100-SM8550-Fix-L2-cache-for-CPU2-and-add-cache-sizes.patch
