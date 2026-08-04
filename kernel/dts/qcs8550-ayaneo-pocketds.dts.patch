@@ -2,48 +2,43 @@ From: virtudude <virtudude@protonmail.com>
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketds.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketds.dts
-@@ -127,11 +127,11 @@
- 		reset-gpios = <&tlmm 152 GPIO_ACTIVE_HIGH>, <&tlmm 153 GPIO_ACTIVE_HIGH>;
+@@ -39,6 +39,21 @@
+ 		enable-active-high;
  	};
  
--	/* Backlight */
-+	/* secondary panel backlight (disabled with &mdss_dsi1) */
- 	backlight: backlight@2e {
- 		compatible = "silergy,sy7758";
- 		reg = <0x2e>;
--		status = "okay";
-+		status = "disabled";
- 	};
++	/*
++	 * The lower panel's ST7703 IOVCC rail is switched by an expander
++	 * GPIO; the mainline panel driver models it as a plain iovcc supply,
++	 * so wrap the enable line in a fixed regulator. The rail is modeled at
++	 * the ST7703 IOVCC nominal level used by the lower-panel path.
++	 */
++	vreg_panel1_iovcc: regulator-panel1-iovcc {
++		compatible = "regulator-fixed";
++		regulator-name = "panel1-iovcc";
++		regulator-min-microvolt = <1800000>;
++		regulator-max-microvolt = <1800000>;
++		gpio = <&tca6408 0 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++	};
++
+ };
  
- 	tca6408: tca64_20@20 {
-@@ -148,9 +148,11 @@
- 	clock-frequency = <400000>;
+ &tlmm {
+@@ -219,13 +234,13 @@
  	status = "okay";
  
-+	/* secondary digitizer (disabled with &mdss_dsi1) */
- 	touchscreen@5d {
- 		reg = <0x5d>;
- 		compatible = "goodix,gt911";
-+		status = "disabled";
- 
- 		interrupt-parent = <&tlmm>;
- 		interrupts = <39 IRQ_TYPE_EDGE_FALLING>;
-@@ -214,9 +216,10 @@
- 	};
- };
- 
-+/* secondary panel disabled; armada drives only the primary */
- &mdss_dsi1 {
- 	vdda-supply = <&vreg_l3e_1p2>;
--	status = "okay";
-+	status = "disabled";
- 
  	panel@0 {
- 		compatible = "ayaneo,pocket-ds-secondary-panel";
-@@ -245,5 +248,5 @@
- 
- &mdss_dsi1_phy {
- 	vdds-supply = <&vreg_l1e_0p88>;
--	status = "okay";
-+	status = "disabled";
- };
+-		compatible = "ayaneo,pocket-ds-secondary-panel";
++		compatible = "ayaneo,pocket-ds-lower-panel";
+ 		reg = <0>;
+ 		pinctrl-0 = <&sde_dsi1_active>;
+ 		pinctrl-1 = <&sde_dsi1_suspend>;
+ 		pinctrl-names = "default", "sleep";
+-		avdd-supply = <&sgm3804>;
+-		enable-gpio = <&tca6408 0 GPIO_ACTIVE_HIGH>;
++		vcc-supply = <&sgm3804>;
++		iovcc-supply = <&vreg_panel1_iovcc>;
+ 		reset-gpios = <&tca6408 2 GPIO_ACTIVE_LOW>;
+ 		rotation = <270>;
+ 		backlight = <&backlight>;
+
