@@ -1,17 +1,18 @@
-From: virtudude <virtudude@protonmail.com>
+From: Armada <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientation
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
-@@ -16,7 +16,7 @@
- 	gpio-keys {
+@@ -30,6 +30,8 @@
+ 
+ 	gpio-keys-lid {
  		compatible = "gpio-keys";
++		pinctrl-0 = <&hall_lid_n>;
++		pinctrl-names = "default";
  
--		pinctrl-0 = <&volume_up_n &key_ayn_n>;
-+		pinctrl-0 = <&volume_up_n &key_ayn_n &hall_lid_n>;
- 
- 		key-ayn {
- 			label = "AYN Key";
-@@ -270,8 +270,6 @@
+ 		hall-lid-sensor {
+ 			label = "Hall Lid Sensor";
+@@ -275,8 +277,6 @@
  
  		touchscreen-size-x = <1080>;
  		touchscreen-size-y = <1920>;
@@ -20,7 +21,7 @@ From: virtudude <virtudude@protonmail.com>
  
  		label = "top_touchscreen";
  	};
-@@ -388,8 +386,6 @@
+@@ -393,8 +393,6 @@
  
  		touchscreen-size-x = <1080>;
  		touchscreen-size-y = <1240>;
@@ -29,11 +30,10 @@ From: virtudude <virtudude@protonmail.com>
  
  		label = "bottom_touchscreen";
  
-@@ -446,6 +442,15 @@
- 		function = "gpio";
+@@ -452,6 +450,15 @@
  		bias-pull-up;
  		output-disable;
-+	};
+ 	};
 +
 +	/* Open-drain hall output: with no pull-up the released (lid open)
 +	   level is undefined. */
@@ -42,6 +42,7 @@ From: virtudude <virtudude@protonmail.com>
 +		function = "gpio";
 +		bias-pull-up;
 +		output-disable;
- 	};
++	};
  };
  
+ &remoteproc_adsp {

@@ -1,4 +1,4 @@
-# armada-kernel patch series — applied top-to-bottom; `#` lines and anything
+# armada-kernel patch series - applied top-to-bottom; `#` lines and anything
 # after a `#` are ignored.
 
 # ============== Display / DRM ==============
@@ -8,34 +8,44 @@
 0048-drm-msm-dsi-reparent-byte-pixel-src-to-xo-on-disable.patch
 0049-drm-msm-dpu-panel-opt-in-8bpc-dither.patch
 0016-rp5-smooth-brightness-adjustment.patch
+0056_Xm-Plus-XM91080G-panel.patch
+0028-drm-panel-Add-panel-driver-for-Chipone-ICNA35XX-base.patch
 0051-gpu-panel-add-Pocket-ACE-panel-driver.patch
 0052-gpu-panel-add-Pocket-DMG-panel-driver.patch
 0053-gpu-panel-add-Pocket-DS-lower-panel-driver.patch
 0055_Synaptics-TD4328-LCD-panel.patch
-0056_Xm-Plus-XM91080G-panel.patch
-0057_Chipone-ICNA35XX-panel.patch
 0057_DDIC-CH13726A-panel.patch
 0062-gpu-drm-panel-add-wt0630-panel.patch
 0104-drm-panel-Add-Retroid-Pocket-6-panel.patch
+0105-drm-panel-Add-Retroid-Pocket-Nova-panel.patch
 
 # ============== Panel power + backlight ==============
 0058_AYN-Odin2-Mini--backlight.patch
 0060-backlight-Add-SY7758-LED-driver.patch
 0060-dt-bindings-silergy-sy7758.patch
-0061-regulator-add-sgm3804-i2c-regulator-for-panel-power-.patch
+0054-regulator-add-sgm3804-i2c-regulator-for-panel-power-.patch
+0056-backlight-aw99706-enable-hwen-before-chip-id-read.patch
+0057-backlight-aw99706-konkr-cfg7.patch
+0062-backlight-aw99706-honor-blank-power-state.patch
 
 # ============== Touchscreen ==============
 0015-touchscreen-edt-ft5x06-allow-to-override-input-name.patch
 0030-input-rmi4-add-reset-gpio.patch
 0032-rmi4-silence-spam-irq-errors.patch
 0053-add-hynitron-touchscreen.patch
-0053-edt-ft5x06-add-no_regmap_bulk_read-option.patch
+0053a-input-hynitron-port-to-gpiod.patch
+0053b-input-hynitron-restore-gpio-init-order.patch
+0054-input-goodix-override-resolution-from-dt.patch
+0029-Input-edt-ft5x06-add-no_regmap_bulk_read-option.patch
 0059_AYN-Odin2-Mini--hynitron--cstxxx.patch
-0060-input-touchscreen-add-synaptics-dsx-kconfig.patch   # keep before the driver
+0060-input-touchscreen-add-synaptics-dsx-kconfig.patch
 0060-input-touchscreen-add-synaptics-dsx-driver.patch
 
 # ============== Input / Gamepad ==============
+0058-input-joystick-add-ayaneo-mcu-joystick.patch
+0069-input-misc-add-konkr-sysbtn-MCU-system-buttons.patch
 0031_input--Add-driver-for-RSInput-Gamepad.patch
+0006-hid-playstation-expose-DualSense-Edge-Fn-and-back-paddles.patch
 0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch
 0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch
 0506-usbcore-add-interrupt-interval-override.patch
@@ -44,40 +54,37 @@
 0071-HACK-fix-usb-boot-hang.patch
 
 # ============== Haptics ==============
-1000-add-qcom-haptics-driver.patch
-1002-haptics-driver-support-periodic-sine-and-fixes.patch
-1003-rsinput-add-ff.patch          # rumble — keep after 1000/1002 (patches qcom-hv-haptics.c) and before 1300
-1300-input-rsinput-ranges.patch
+1000-input-misc-qcom-hv-haptics-sm8750.patch
+1001-input-qcom-haptics-update-assign-str.patch
+1001-haptics-driver-support-periodic-sine-and-fixes.patch
+1002-input-rsinput-sm8750-ff.patch
+1300-input-rsinput-axis-deadzone.patch
 
 # ============== Audio ==============
+0059-ASoC-aw88395-lib-skip-monitor-sections-in-V1-ACF-parse.patch
+0063-ASoC-wcd939x-route-usbss-on-integrated-jack-insert.patch
+0064-ASoC-wcd-mbhc-clear-stale-jack-report-on-mechanical-removal.patch
 0036_ASoC--qcom--sc8280xp-Add-support-for-Primary-I2S.patch
-0047_ASoC--codecs--aw88166--AYN-Odin2-Specific-modifica.patch
+0032-ASoC-codecs-aw88166-AYN-Products-Specific-modificati.patch
 
 # ============== LED / RGB ==============
-0033_leds--Add-driver-for-HEROIC-HTR3212.patch
+0030-leds-Add-driver-for-HEROIC-HTR3212.patch
 
 # ============== PWM ==============
-0050_pmk8550-pwm.patch
 0054_sn3112-pwm-driver.patch
-
-# ============== Storage ==============
-0042_mmc--sdhci-msm--Toggle-the-FIFO-write-clock-after-.patch
 
 # ============== SoC / Platform ==============
 20260424_neil_armstrong_arm64_dts_qcom_sm8_456_50_add_missing_cx_power_domain_to_gcc.patch
-v6_20260210_quic_utiwari_crypto_qce_add_runtime_pm_and_interconnect_bandwidth_scaling_support.patch
+v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0504-wakeup-qcom-ipcc-remove-IRQF-NO-SUSPEND.patch
 0505-msm_gem-lock-before-put_iova_spaces.patch
 
-# ============== SM8550 DTSI prereqs (AYN common DTSI references these) ==============
-0100-SM8550-Fix-L2-cache-for-CPU2-and-add-cache-sizes.patch
+# ============== SM8550 DTSI prerequisites ==============
+0001-pcie-update-sm8550-dtsi.patch
 0101-v3_20260219_webgeek1234_arm64_qcom_sm8550_add_ddr_llcc_l3_cpu_bandwidth_scaling.patch
-0102-20240424_wuxilin123_ayn_odin_2_support.patch
-0103_arm64--dts--qcom--sm8550--add-UART15.patch
 0120-20250728_konradybcio_gpu_cc_power_requirements_reality_check.patch
 0121-pmdomain-qcom-rpmhpd-no-max-clamp-on-gmu-rails.patch
 0122-interconnect__qcom__sm8550__Enable_QoS_configuration.patch
-0154-dts-qcom-sm8550-add-opp-acd-level.patch
 0200-ASoC-wcd938x-add-DMIC-DAPM-inputs.patch
 
 # ============== System tweaks ==============
@@ -87,15 +94,18 @@ v6_20260210_quic_utiwari_crypto_qce_add_runtime_pm_and_interconnect_bandwidth_sc
 0900-power-supply-qcom-battmgr-log-usb-adapter-type.patch
 
 # ============== SM8650 (AYANEO Pocket S2, KONKR Pocket FIT) ==============
+0001-pcie-update-sm8650-dtsi.patch
 0006-add-hw_params-callback-function-to-drm_connector_hdmi_audio_ops.patch
-0007-audioreach-Add-dedicated-WSA2-support.patch
-0040-dts-qcom-sm8650-Add-sound-DAI-prefix-for-DP.patch
-0050-update-sm8650-dtsi.patch
+0007-ASoC-qcom-audioreach-compute-active-channel-maps.patch
+0008-ASoC-dt-bindings-qcom-sm8250-Add-Ayaneo-Pocket-S2.patch
+0009-ASoC-qcom-sc8280xp-add-Ayaneo-Pocket-S2-card.patch
+0010-ASoC-qcom-add-KONKR-Pocket-FIT-WSA2-card.patch
 v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0063-gpu-drm-panel-add-pocket-fit-panel.patch
-0064-add-chipone-tddi-touchscreen.patch
+0064-input-touchscreen-add-rocknix-chipone-tddi.patch
 
 # ============== SM8250 (Retroid Pocket 5, Mini, Mini V2, Flip2) ==============
+0014-sm8250-ath11k-fix-wifi-mac.patch
 0004-pm8150b.patch
 0009-qcom-spmi-haptics.patch
 0008-retroid-gamepad.patch
@@ -111,13 +121,16 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0102-arm64-dts-qcom-pm8150-Add-nvmem-support-for-PM8150-R.patch
 9999-sm8250-disable-coresight-stm.patch
 
-# ============== SM8750 (AYN Odin 3) ==============
+# ============== SM8750 (AYN Odin 3, KONKR Pocket FIT Elite) ==============
 0026-dt-bindings-arm-qcom-ids-Add-SoC-ID-for-CQ8725S.patch
 0027-soc-qcom-socinfo-Add-CQ8725S-SoC-ID.patch
 0034-arm64-dts-qcom-sm8750-Add-UART15.patch
-sm8750-gpucc-clock-controller.patch
-sm8750-add-display-gpu-nodes.patch
-sm8750-adreno-a830-gpu-driver.patch
+0033-arm64-dts-qcom-sm8750-gpu-clock-controllers.patch
+0038-arm64-dts-qcom-sm8750-add-GPU-nodes.patch
+0038a-arm64-dts-qcom-sm8750-map-A8xx-RSCC-registers.patch
+0049-drm-msm-a8xx-add-adreno-830-catalog.patch
+0050-clk-qcom-gxclkctl-kaanapali-fix-gx-gdsc-collapse.patch
+0051-drm-msm-a6xx-limit-gxpd-votes-to-recovery-in-a8x.patch
 0039-wifi-ath12k-add-initial-hardware-definition-for-WCN7.patch
 0040-wifi-ath12k-send-QDSS-config-when-CNSS_QDSS_CFG_MISS.patch
 0041-wifi-ath12k-disable-CNSS_QDSS_CFG_MISS_V01-for-the-W.patch
@@ -125,4 +138,13 @@ sm8750-adreno-a830-gpu-driver.patch
 0043-power-sequencing-qcom-wcn-add-support-for-WCN7860.patch
 0044-clk-qcom-gcc-sm8750-Do-not-turn-off-PCIe-GDSCs-durin.patch
 0045-Bluetooth-qca-add-WCN7860-support.patch
-0600-ROCKNIX-sm8750-tsens-thermal-zones.patch
+0066-scsi-ufs-ufs-qcom-add-sm8750-compatible.patch
+0509-soc-qcom-pmic_glink_altmode-defer-until-mux-switch-ready.patch
+0517-usb-typec-mux-dont-swallow-EPROBE_DEFER.patch
+0603-ASoC-codecs-wcd939x-keep-the-codec-resumed-while-a-ja.patch
+0060-ASoC-qcom-sc8280xp-enable-MI2S-bit-clock-on-BE-startup.patch
+0072-ASoC-lpass-rx-macro-add-HPH-PCM-mode.patch
+0073-ASoC-wcd939x-add-HPH-PCM-HiFi-mode.patch
+0074-soundwire-qcom-PCM-data-port-format-enable.patch
+0612-ROCKNIX-odin3-q6apm-start-mi2s-port-at-prepare.patch
+0613-ASoC-q6apm-scope-prepare-start-to-MI2S.patch

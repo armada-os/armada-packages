@@ -1,4 +1,5 @@
-From: virtudude <virtudude@protonmail.com>
+From: Armada <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: pocketds: disable the secondary display
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketds.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketds.dts

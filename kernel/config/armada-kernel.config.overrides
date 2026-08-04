@@ -93,6 +93,7 @@ CONFIG_PHY_SNPS_EUSB2=y
 CONFIG_REGULATOR_QCOM_REFGEN=y
 
 CONFIG_TYPEC=y
+CONFIG_TYPEC_UCSI=y
 CONFIG_TYPEC_TCPM=y
 CONFIG_TYPEC_QCOM_PMIC=y
 CONFIG_TYPEC_MUX_NB7VPQ904M=y
@@ -122,6 +123,8 @@ CONFIG_DRM_PANEL_AYANEO_WT0600_2K=y         # AYN Thor
 CONFIG_INPUT_JOYSTICK=y
 CONFIG_INPUT_JOYDEV=m
 CONFIG_JOYSTICK_RSINPUT=m
+CONFIG_JOYSTICK_MCU=y                     # KONKR Pocket FIT Elite SPI gamepad
+CONFIG_INPUT_KONKR_SYSBTN=y               # KONKR Pocket FIT Elite system buttons
 
 # ============== Touchscreens ==============
 CONFIG_TOUCHSCREEN_HYNITRON_CSTXXX=m
@@ -137,17 +140,19 @@ CONFIG_TOUCHSCREEN_SYNAPTICS_DSX=m
 CONFIG_LEDS_HTR3212=y
 
 # ============== Haptics ==============
-CONFIG_INPUT_QCOM_HV_HAPTICS=m              # required by common.dtsi
+CONFIG_INPUT_QCOM_HV_HAPTICS=m              # required by SM8550/SM8750 AYN common DTSI
 
 # ============== PWM ==============
 CONFIG_PWM_SN3112=m
 
 # ============== Panel power + backlight ==============
+CONFIG_DRM_PANEL_ILITEK_IL97680A=y          # Retroid Pocket Nova
 CONFIG_REGULATOR=y
 CONFIG_REGULATOR_FIXED_VOLTAGE=y
 CONFIG_REGULATOR_SGM3804=y
 CONFIG_BACKLIGHT_SY7758=y
 CONFIG_BACKLIGHT_ODIN2MINI=y
+CONFIG_BACKLIGHT_AW99706=y                # KONKR Pocket FIT Elite
 # =y not =m: a modular backlight PWM provider makes the panel bind late (from
 # the rootfs). Gated by LEDS_CLASS_MULTICOLOR, which must be =y too.
 CONFIG_LEDS_CLASS_MULTICOLOR=y
@@ -250,8 +255,8 @@ CONFIG_SM_TCSRCC_8650=y
 CONFIG_SM_CAMCC_8650=y
 CONFIG_PINCTRL_SM8650=y
 CONFIG_INTERCONNECT_QCOM_SM8650=y
-CONFIG_DRM_PANEL_AR14=y                     # KONKR Pocket FIT
-CONFIG_TOUCHSCREEN_CHIPONE_TDDI=m           # KONKR Pocket FIT (ICNL9922C)
+CONFIG_DRM_PANEL_AR14=y                     # KONKR Pocket FIT + Pocket FIT Elite
+CONFIG_TOUCHSCREEN_CHIPONE_TDDI=m           # KONKR Pocket FIT + Elite (ICNL9922C)
 CONFIG_TOUCHSCREEN_GOODIX=m                 # Pocket S2 + Pocket DS
 CONFIG_ATH12K=m                             # WCN7850/WCN7860 Wi-Fi (SM8650 + SM8750)
 
@@ -285,7 +290,7 @@ CONFIG_SND_SOC_LPASS_TX_MACRO=m
 CONFIG_CLK_GFM_LPASS_SM8250=m
 CONFIG_QCOM_Q6V5_PAS=m
 
-# ============== SM8750 (AYN Odin 3) ==============
+# ============== SM8750 (AYN Odin 3, KONKR Pocket FIT Elite) ==============
 # gpucc is added by a patch (see patches/); the icna3520 panel reuses
 # DRM_PANEL_CHIPONE_ICNA35XX above.
 CONFIG_SM_GCC_8750=y

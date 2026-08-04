@@ -181,7 +181,7 @@ diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/at
 index d493ec812055..0e535e96e27b 100644
 --- a/drivers/net/wireless/ath/ath12k/mac.c
 +++ b/drivers/net/wireless/ath/ath12k/mac.c
-@@ -159,6 +159,91 @@ static const struct ieee80211_channel ath12k_6ghz_channels[] = {
+@@ -164,6 +164,91 @@ static const struct ieee80211_channel ath12k_6ghz_channels[] = {
  	CHAN6G(233, 7115, 0),
  };
  
@@ -270,9 +270,9 @@ index d493ec812055..0e535e96e27b 100644
 +		dst[i] = src[ETH_ALEN - 1 - i];
 +}
 +
- static struct ieee80211_rate ath12k_legacy_rates[] = {
- 	{ .bitrate = 10,
- 	  .hw_value = ATH12K_HW_RATE_CCK_LP_1M },
+ #define ATH12K_MAC_RATE_A_M(bps, code) \
+ 	{ .bitrate = (bps), .hw_value = (code),\
+ 	  .flags = IEEE80211_RATE_MANDATORY_A }
 @@ -9533,6 +9618,7 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
  	struct ath12k_base *ab = ar->ab;
  	struct ath12k_pdev *pdev;

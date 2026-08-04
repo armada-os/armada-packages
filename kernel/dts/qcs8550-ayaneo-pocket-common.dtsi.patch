@@ -1,4 +1,5 @@
-From: virtudude <virtudude@protonmail.com>
+From: Armada <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: qcs8550-ayaneo: drop the SDHCI capability mask
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocket-common.dtsi
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocket-common.dtsi

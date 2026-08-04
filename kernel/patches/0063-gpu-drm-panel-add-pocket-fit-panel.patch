@@ -4,9 +4,17 @@ Date: Tue, 13 Jan 2026 20:48:26 +0100
 Subject: [PATCH] gpu:drm:panel:add pocket fit panel
 
 ---
+ drivers/gpu/drm/panel/Kconfig            |  13 +
+ drivers/gpu/drm/panel/Makefile           |   1 +
+ drivers/gpu/drm/panel/panel-ar14-144hz.c | 481 +++++++++++++++++++++++
+ 3 files changed, 495 insertions(+)
+ create mode 100644 drivers/gpu/drm/panel/panel-ar14-144hz.c
+
+diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
+index 407c5f6a268b..6481e0100061 100644
 --- a/drivers/gpu/drm/panel/Kconfig
 +++ b/drivers/gpu/drm/panel/Kconfig
-@@ -47,6 +47,19 @@
+@@ -47,6 +47,19 @@ config DRM_PANEL_AR11_5INCH
           Say Y here if you want to enable support for Ayaneo Pocket DS
           1024x768Panel.
  
@@ -26,6 +34,8 @@ Subject: [PATCH] gpu:drm:panel:add pocket fit panel
  config DRM_PANEL_ARM_VERSATILE
  	tristate "ARM Versatile panel driver"
  	depends on OF
+diff --git a/drivers/gpu/drm/panel/Makefile b/drivers/gpu/drm/panel/Makefile
+index 3615a761b44f..5ae127482f10 100644
 --- a/drivers/gpu/drm/panel/Makefile
 +++ b/drivers/gpu/drm/panel/Makefile
 @@ -1,5 +1,6 @@
@@ -35,6 +45,9 @@ Subject: [PATCH] gpu:drm:panel:add pocket fit panel
  obj-$(CONFIG_DRM_PANEL_AR06_4INCH) += panel-ar06-4inch.o
  obj-$(CONFIG_DRM_PANEL_AR02_3INCH) += panel-ar02-3inch.o
  obj-$(CONFIG_DRM_PANEL_AR11_5INCH) += panel-ar11-5inch.o
+diff --git a/drivers/gpu/drm/panel/panel-ar14-144hz.c b/drivers/gpu/drm/panel/panel-ar14-144hz.c
+new file mode 100644
+index 000000000000..0685888ab89f
 --- /dev/null
 +++ b/drivers/gpu/drm/panel/panel-ar14-144hz.c
 @@ -0,0 +1,481 @@
@@ -519,3 +532,5 @@ Subject: [PATCH] gpu:drm:panel:add pocket fit panel
 +MODULE_AUTHOR("ROCKNIX");
 +MODULE_DESCRIPTION("DRM driver for ar14 1080p 144hz video mode dsi panel");
 +MODULE_LICENSE("GPL");
+-- 
+2.52.0

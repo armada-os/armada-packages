@@ -1,13 +1,40 @@
+From: ROCKNIX <noreply@rocknix.org>
+Subject: [PATCH] mailbox: qcom-ipcc: allow SM8750 IRQ suspension
+
+SM8750 suspend-to-RAM requires the IPCC summary interrupt to be suspended.
+Keep IRQF_NO_SUSPEND on every other SoC so the SM8750 workaround does not
+change established suspend behavior on the shared driver.
+
 diff --git a/drivers/mailbox/qcom-ipcc.c b/drivers/mailbox/qcom-ipcc.c
-index d957d989c..2e4bb5efb 100644
 --- a/drivers/mailbox/qcom-ipcc.c
 +++ b/drivers/mailbox/qcom-ipcc.c
-@@ -321,7 +321,7 @@ static int qcom_ipcc_probe(struct platform_device *pdev)
+@@ -9,6 +9,7 @@
+ #include <linux/irqdomain.h>
+ #include <linux/mailbox_controller.h>
+ #include <linux/module.h>
++#include <linux/of.h>
+ #include <linux/platform_device.h>
+ 
+ #include <dt-bindings/mailbox/qcom-ipcc.h>
+@@ -279,6 +279,7 @@ static int qcom_ipcc_probe(struct platform_device *pdev)
+ 	u32 config_value;
+ 	static int id;
+ 	char *name;
++	unsigned long irqflags = IRQF_TRIGGER_HIGH | IRQF_NO_THREAD;
+ 	int ret;
+ 
+ 	ipcc = devm_kzalloc(&pdev->dev, sizeof(*ipcc), GFP_KERNEL);
+@@ -318,9 +319,11 @@ static int qcom_ipcc_probe(struct platform_device *pdev)
+ 	if (ret)
  		goto err_mbox;
  
++	if (!of_device_is_compatible(pdev->dev.of_node, "qcom,sm8750-ipcc"))
++		irqflags |= IRQF_NO_SUSPEND;
++
  	ret = devm_request_irq(&pdev->dev, ipcc->irq, qcom_ipcc_irq_fn,
 -			       IRQF_TRIGGER_HIGH | IRQF_NO_SUSPEND |
-+			       IRQF_TRIGGER_HIGH |
- 			       IRQF_NO_THREAD, name, ipcc);
+-			       IRQF_NO_THREAD, name, ipcc);
++			       irqflags, name, ipcc);
  	if (ret < 0) {
  		dev_err(&pdev->dev, "Failed to register the irq: %d\n", ret);
+ 		goto err_req_irq;

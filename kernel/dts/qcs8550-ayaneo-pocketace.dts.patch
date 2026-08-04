@@ -1,5 +1,5 @@
-From: virtudude <virtudude@protonmail.com>
-Subject: armada: qcs8550-ayaneo-pocketace: wire SY7758 enable-gpios for upstream driver
+From: Armada <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: pocketace: wire the SY7758 enable GPIO
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketace.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketace.dts

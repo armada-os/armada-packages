@@ -96,7 +96,32 @@ if [ -z "${FAST:-}" ]; then
             echo "  WARN: ${line} not in patches/ (skipping)"
             continue
         fi
-        if patch -p1 --no-backup-if-mismatch --quiet < "${PATCH}" 2>/dev/null; then
+
+        # GNU patch can return success after consuming only the first hunk of a
+        # malformed patch and labelling the rest "trailing garbage". Preflight
+        # verbosely and require every hunk header in the payload to be applied.
+        patch_log=$(mktemp)
+        expected_hunks=$(grep -c '^@@ ' "${PATCH}" || true)
+        if ! patch -p1 --batch --forward -F0 --dry-run --verbose \
+                < "${PATCH}" > "${patch_log}" 2>&1; then
+            cat "${patch_log}"
+            rm -f "${patch_log}"
+            FAILED=$((FAILED+1))
+            echo "  ✗ ${line}  (preflight failed in ${SRC_DIR})"
+            continue
+        fi
+        applied_hunks=$(grep -c '^Hunk #[0-9].*succeeded' "${patch_log}" || true)
+        if [ "${applied_hunks}" -ne "${expected_hunks}" ]; then
+            cat "${patch_log}"
+            rm -f "${patch_log}"
+            FAILED=$((FAILED+1))
+            echo "  ✗ ${line}  (${applied_hunks}/${expected_hunks} hunks parsed)"
+            continue
+        fi
+        rm -f "${patch_log}"
+
+        if patch -p1 --batch --forward -F0 --no-backup-if-mismatch --quiet \
+                < "${PATCH}"; then
             APPLIED=$((APPLIED+1))
             echo "  ✓ ${line}"
         else
@@ -126,7 +151,7 @@ cp -v "${DTS_DIR}"/*.dts "${DTS_DIR}"/*.dtsi "${DTS_TARGET}/" 2>&1 | sed 's/^/  
 echo "==> Applying DTS edit patches"
 for p in "${DTS_DIR}"/*.patch; do
     [ -e "${p}" ] || continue
-    if patch -p1 -d "${SRC_DIR}" --no-backup-if-mismatch -s < "${p}"; then
+    if patch -p1 -d "${SRC_DIR}" -F0 --no-backup-if-mismatch -s < "${p}"; then
         echo "  ✓ $(basename "${p}")"
     else
         echo "  ✗ $(basename "${p}") failed (see *.rej in ${DTS_TARGET})"; exit 1
@@ -150,8 +175,8 @@ if ! grep -q "# armada-kernel DTBs" "${QCOM_MAKEFILE}" 2>/dev/null; then
 fi
 
 # ---------- 4. Generate config ----------
-# defconfig + fragment via merge_config.sh, which fails the build if a requested
-# symbol doesn't survive Kconfig deps (a silent =y->=m demotion).
+# defconfig + fragment via merge_config.sh. Explicit =y requests are checked
+# after Kconfig resolution so a dependency cannot silently demote them to =m.
 if [ -z "${FAST:-}" ]; then
     echo "==> Generating .config from defconfig"
     make "${MAKE_ARGS[@]}" defconfig >/dev/null
@@ -168,7 +193,20 @@ if [ -f "${KCONFIG_OVERRIDES}" ]; then
     # kconfig's conf can't parse trailing inline comments; strip them off assignments
     sed -E '/^[[:space:]]*CONFIG_[A-Z0-9_]+=/ s/[[:space:]]*#.*$//' "${KCONFIG_OVERRIDES}" > "${frag}"
     bash scripts/kconfig/merge_config.sh .config "${frag}" 2>&1 | tee "${merge_log}"
-    if grep -q "not in final .config" "${merge_log}"; then
+    config_error=0
+    while IFS= read -r requested; do
+        case "${requested}" in
+            CONFIG_*=y)
+                symbol="${requested%%=*}"
+                if ! grep -qx "${symbol}=y" .config; then
+                    actual=$(grep -E "^${symbol}=" .config || true)
+                    echo "ERROR: ${requested} did not survive Kconfig dependencies; actual: ${actual:-not set}"
+                    config_error=1
+                fi
+                ;;
+        esac
+    done < "${frag}"
+    if [ "${config_error}" -ne 0 ] || grep -q "not in final .config" "${merge_log}"; then
         rm -f "${frag}" "${merge_log}"
         echo "ERROR: a requested CONFIG didn't survive Kconfig deps (see above); check the depends-on chain."
         exit 1

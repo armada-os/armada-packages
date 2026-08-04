@@ -1,26 +1,33 @@
-Subject: [PATCH] pmdomain: qcom: rpmhpd: don't clamp GMU-managed rails pre-sync_state
+From: ROCKNIX <noreply@rocknix.org>
+Subject: [PATCH] pmdomain: qcom: rpmhpd: don't clamp the SM8550 GFX rail pre-sync_state
 
-Mark gfx/gmxc state_synced from boot so pre-sync votes use the real
-lowest corner instead. These rails carry no bootloader state and
-have no other consumers, so the clamp protects nothing on them.
+Give SM8550 a dedicated GFX power-domain descriptor that is treated as
+synced from boot, so its pre-sync votes use the real lowest corner. Keep
+the shared descriptor unchanged for the other Qualcomm SoCs.
 
 ---
 diff --git a/drivers/pmdomain/qcom/rpmhpd.c b/drivers/pmdomain/qcom/rpmhpd.c
 --- a/drivers/pmdomain/qcom/rpmhpd.c
 +++ b/drivers/pmdomain/qcom/rpmhpd.c
-@@ -120,6 +120,7 @@ static struct rpmhpd gbx = {
- static struct rpmhpd gfx = {
- 	.pd = { .name = "gfx", },
+@@ -122,6 +122,12 @@
  	.res_name = "gfx.lvl",
-+	.state_synced = true,
  };
  
++static struct rpmhpd gfx_sm8550 = {
++	.pd = { .name = "gfx", },
++	.res_name = "gfx.lvl",
++	.state_synced = true,
++};
++
  static struct rpmhpd lcx = {
-@@ -225,6 +226,7 @@ static struct rpmhpd qphy = {
- static struct rpmhpd gmxc = {
- 	.pd = { .name = "gmxc", },
- 	.res_name = "gmxc.lvl",
-+	.state_synced = true,
- };
- 
- /* Eliza RPMH powerdomains */
+ 	.pd = { .name = "lcx", },
+ 	.res_name = "lcx.lvl",
+@@ -559,7 +565,7 @@
+ 	[RPMHPD_CX] = &cx,
+ 	[RPMHPD_CX_AO] = &cx_ao,
+ 	[RPMHPD_EBI] = &ebi,
+-	[RPMHPD_GFX] = &gfx,
++	[RPMHPD_GFX] = &gfx_sm8550,
+ 	[RPMHPD_LCX] = &lcx,
+ 	[RPMHPD_LMX] = &lmx,
+ 	[RPMHPD_MMCX] = &mmcx_w_cx_parent,

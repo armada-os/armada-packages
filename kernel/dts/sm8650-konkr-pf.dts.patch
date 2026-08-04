@@ -1,28 +1,16 @@
-From: Kevin Kreiser <kevinkreiser@gmail.com>
+From: Armada <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: pocket-fit: use the dedicated sound card
 
 --- a/arch/arm64/boot/dts/qcom/sm8650-konkr-pf.dts
 +++ b/arch/arm64/boot/dts/qcom/sm8650-konkr-pf.dts
-@@ -52,3 +52,23 @@
- 
- 	status = "okay";
+@@ -12,6 +12,10 @@
+ 	compatible = "konkr,pocket-fit", "qcom,sm8650";
  };
-+
-+&i2c4 {
-+	touchscreen@48 {
-+		compatible = "chipone-tddi";
-+		reg = <0x48>;
-+
-+		interrupt-parent = <&tlmm>;
-+		interrupts = <162 IRQ_TYPE_EDGE_FALLING>;
-+
-+		chipone,irq-gpio = <&tlmm 162 GPIO_ACTIVE_HIGH>;
-+		chipone,rst-gpio = <&tlmm 161 GPIO_ACTIVE_HIGH>;
-+		chipone,x-res = <1080>;
-+		chipone,y-res = <1920>;
-+
-+		pinctrl-names = "default";
-+		pinctrl-0 = <&ts_irq_default>, <&ts_reset_default>;
-+
-+		status = "okay";
-+	};
+ 
++&{/sound} {
++	compatible = "konkr,pocket-fit-sndcard";
 +};
++
+ &mdss_dsi0 {
+ 	status = "okay";
+ 	vdda-supply = <&vreg_l3i_1p2>;

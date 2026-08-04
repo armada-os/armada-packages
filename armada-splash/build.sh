@@ -16,17 +16,27 @@ podman run --rm \
   --platform linux/aarch64 \
   "${BUILDER_IMAGE}" \
   bash -euxo pipefail -c '
-    dnf -y install gcc libX11-devel libdrm-devel
+    cat >/etc/rpm/macros.armada <<EOF
+%_buildhost armada-builder
+%packager Armada
+%vendor Armada
+EOF
 
-    # stb_truetype in its own TU (third-party; warnings suppressed).
-    gcc -O2 -w -c stb_impl.c -o stb_impl.o
+    NAME=armada-splash
 
-    gcc -O2 -Wall -Wextra -DHAVE_X11 -o out/armada-splash \
-        armada-splash.c stb_impl.o \
-        $(pkg-config --cflags --libs x11 libdrm) -lm
+    dnf -y install --skip-unavailable \
+      rpm-build rpmdevtools dnf-plugins-core \
+      tar gzip
+    dnf -y builddep "${NAME}.spec"
+    rpmdev-setuptree
 
-    strip out/armada-splash
-    rm -f stb_impl.o
+    cp ${NAME}.spec ~/rpmbuild/SPECS/
+    tar -cvzf ~/rpmbuild/SOURCES/${NAME}.tar.gz /work/
+
+    spectool -g -R ~/rpmbuild/SPECS/${NAME}.spec
+    rpmbuild -bb ~/rpmbuild/SPECS/${NAME}.spec
+
+    cp ~/rpmbuild/RPMS/aarch64/*.rpm /work/out/
   '
 
 echo "built: ${PACKAGE_DIR}/out"

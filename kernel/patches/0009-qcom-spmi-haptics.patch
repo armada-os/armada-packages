@@ -1,9 +1,9 @@
 diff -rupbN linux.orig/drivers/input/misc/Kconfig linux/drivers/input/misc/Kconfig
 --- linux.orig/drivers/input/misc/Kconfig	2024-11-29 14:02:16.843088116 +0000
 +++ linux/drivers/input/misc/Kconfig	2024-11-29 21:44:33.960672692 +0000
-@@ -214,6 +214,18 @@ config INPUT_PMIC8XXX_PWRKEY
- 	  To compile this driver as a module, choose M here: the
- 	  module will be called pmic8xxx-pwrkey.
+@@ -250,6 +250,18 @@ config INPUT_QCOM_HV_HAPTICS
+ 	  for playing different vibration effects. To compile this driver as a module,
+ 	  choose M here: the module will be called qcom-hv-haptics.
  
 +config INPUT_QCOM_SPMI_HAPTICS
 +	tristate "Qualcomm SPMI HAPTICS"

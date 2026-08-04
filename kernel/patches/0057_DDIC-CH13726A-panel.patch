@@ -7,8 +7,8 @@ Signed-off-by: Teguh Sobirin <teguh@sobir.in>
 ---
  drivers/gpu/drm/panel/Kconfig               |  11 +
  drivers/gpu/drm/panel/Makefile              |   1 +
- drivers/gpu/drm/panel/panel-ddic-ch13726a.c | 327 ++++++++++++++++++++
- 3 files changed, 339 insertions(+)
+ drivers/gpu/drm/panel/panel-ddic-ch13726a.c | 328 ++++++++++++++++++++
+ 3 files changed, 340 insertions(+)
  create mode 100644 drivers/gpu/drm/panel/panel-ddic-ch13726a.c
 
 diff --git a/drivers/gpu/drm/panel/Kconfig b/drivers/gpu/drm/panel/Kconfig
@@ -50,7 +50,7 @@ new file mode 100644
 index 000000000000..946ad32f9b82
 --- /dev/null
 +++ b/drivers/gpu/drm/panel/panel-ddic-ch13726a.c
-@@ -0,0 +1,327 @@
+@@ -0,0 +1,328 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * DDIC CH13726A MIPI-DSI panel driver
@@ -105,6 +105,7 @@ index 000000000000..946ad32f9b82
 +	mipi_dsi_generic_write_seq_multi(&dsi_ctx, 0xb9, 0x00);
 +	
 +	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
++	mipi_dsi_msleep(&dsi_ctx, 120);
 +
 +	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
 +
@@ -380,4 +381,3 @@ index 000000000000..946ad32f9b82
 +MODULE_LICENSE("GPL");
 -- 
 2.34.1
-

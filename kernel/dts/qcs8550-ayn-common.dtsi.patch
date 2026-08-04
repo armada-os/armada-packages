@@ -1,8 +1,9 @@
-From: virtudude <virtudude@protonmail.com>
+From: Armada <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: qcs8550-ayn: enable SDHCI capabilities and rumble
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayn-common.dtsi
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayn-common.dtsi
-@@ -1461,7 +1461,6 @@
+@@ -1462,7 +1462,6 @@
  	no-mmc;
  
  	qcom,dll-config = <0x0007442c>;
@@ -10,3 +11,11 @@ From: virtudude <virtudude@protonmail.com>
  
  	status = "okay";
  };
+@@ -1700,6 +1699,7 @@
+ 
+ 	gamepad: gamepad {
+ 		compatible = "gamepad,rsinput";
++		rumble-haptics;
+ 
+ 		gamepad-name = "AYN Odin2 Gamepad";
+ 		gamepad-bus = <0x0003>;
