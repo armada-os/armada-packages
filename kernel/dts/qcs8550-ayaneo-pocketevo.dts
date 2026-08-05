@@ -171,3 +171,23 @@
 		};
 	};
 };
+
+/*
+ * Drop the fan tachometer interrupt.
+ *
+ * qcs8550-ayaneo-pocket-common.dtsi gives pwm-fan an edge-falling TLMM
+ * interrupt on GPIO 64 for the tacho. It fires roughly 80 times a second
+ * whenever the fan spins -- /proc/interrupts on a Pocket EVO showed it past
+ * 234,000 -- for a reading nothing consumes. The AYN Odin 3 declares no tacho
+ * interrupt at all.
+ *
+ * Overridden here rather than in the shared DTSI, which six other boards
+ * include and whose fan wiring has not been checked.
+ *
+ * Cost: hwmon fan1_input stops reporting RPM, matching the Odin 3. Nothing in
+ * armada reads it; armada-powerd only writes pwm1/pwm1_enable.
+ */
+&pwm_fan {
+	/delete-property/ interrupts;
+	/delete-property/ interrupt-parent;
+};
