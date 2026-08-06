@@ -1,0 +1,584 @@
+From 7be6ece5f00b10297dac32fc9a3aaf7045fb053a Mon Sep 17 00:00:00 2001
+From: Armada <noreply@armada.local>
+Date: Thu, 6 Aug 2026 13:13:58 -0400
+Subject: [PATCH] armada: gate SM8550 native-sleep workarounds at boot
+
+Require sm8550.ns=1 on an SM8550 machine before enabling the
+experimental suspend behavior.
+
+Keep the pre-series DWC eligibility test and existing Qualcomm PCIe
+suspend path when the gate is off so merely carrying the patch stack
+does not opt other platforms into D3cold.
+---
+ drivers/input/joystick/rsinput.c              |  39 +++---
+ .../pci/controller/dwc/pcie-designware-host.c |  13 +-
+ drivers/pci/controller/dwc/pcie-qcom.c        | 127 +++++++++++++++---
+ drivers/thermal/qcom/tsens.c                  |   2 +-
+ drivers/tty/serial/qcom_geni_serial.c         |   3 +
+ drivers/ufs/core/ufshcd.c                     |  15 ++-
+ drivers/ufs/host/ufs-qcom.c                   |   4 +-
+ drivers/usb/typec/ucsi/ucsi_glink.c           |  12 +-
+ include/linux/suspend.h                       |   6 +
+ include/ufs/ufshcd.h                          |   2 +
+ kernel/power/main.c                           |  28 ++++
+ 11 files changed, 192 insertions(+), 59 deletions(-)
+
+diff --git a/drivers/input/joystick/rsinput.c b/drivers/input/joystick/rsinput.c
+index 9601f6e..25e1602 100644
+--- a/drivers/input/joystick/rsinput.c
++++ b/drivers/input/joystick/rsinput.c
+@@ -18,6 +18,7 @@
+ #include <linux/serdev.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/qcom_hv_haptics.h>
++#include <linux/suspend.h>
+ #include <linux/workqueue.h>
+ #include <uapi/linux/sched/types.h>
+ 
+@@ -650,39 +651,31 @@ static void rsinput_remove(struct serdev_device *serdev) {
+ 
+ static int rsinput_suspend(struct device *dev)
+ {
+-    struct rsinput_driver *drv = dev_get_drvdata(dev);
++	struct rsinput_driver *drv = dev_get_drvdata(dev);
+ 
+-    /* a pending rumble start must not fire into or after haptics suspend */
+-    if (drv->rumble_work.func)
+-        cancel_work_sync(&drv->rumble_work);
++	/* Rumble work must stop even when native-sleep handling is gated off. */
++	if (drv->rumble_work.func)
++		cancel_work_sync(&drv->rumble_work);
+ 
+-    if (!device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
+-        return 0;
++	if (!sm8550_native_sleep_enabled() ||
++	    !device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
++		return 0;
+ 
+-    /*
+-     * The MCU streams gamepad reports continuously over the UART. If it keeps
+-     * sending across the system-suspend teardown, the geni-serial RX interrupt
+-     * storms while the port is being stopped, the primary handler returns
+-     * IRQ_NONE, and the kernel's spurious-IRQ detector permanently disables the
+-     * UART IRQ -- leaving the gamepad dead after resume until the IRQ is
+-     * re-requested. Quiesce the MCU (drop its enable rail and hold it in reset,
+-     * mirroring rsinput_remove) so the line goes silent before the UART
+-     * suspends; rsinput_resume() re-powers and re-initialises it.
+-     */
+-    if (drv->enable_gpio)
+-        gpiod_set_value_cansleep(drv->enable_gpio, 0);
++	/* Stop MCU UART traffic before GENI teardown to prevent a stuck IRQ. */
++	if (drv->enable_gpio)
++		gpiod_set_value_cansleep(drv->enable_gpio, 0);
+ 
+-    if (drv->reset_gpio)
+-        gpiod_set_value_cansleep(drv->reset_gpio, 0);
++	if (drv->reset_gpio)
++		gpiod_set_value_cansleep(drv->reset_gpio, 0);
+ 
+-    return 0;
++	return 0;
+ }
+ 
+ static int rsinput_resume(struct device *dev)
+ {
+-    struct rsinput_driver *drv = dev_get_drvdata(dev);
++	struct rsinput_driver *drv = dev_get_drvdata(dev);
+ 
+-    return rsinput_init_commands(drv);
++	return rsinput_init_commands(drv);
+ }
+ 
+ static DEFINE_SIMPLE_DEV_PM_OPS(rsinput_pm_ops, rsinput_suspend, rsinput_resume);
+diff --git a/drivers/pci/controller/dwc/pcie-designware-host.c b/drivers/pci/controller/dwc/pcie-designware-host.c
+index cffb34f..610af8e 100644
+--- a/drivers/pci/controller/dwc/pcie-designware-host.c
++++ b/drivers/pci/controller/dwc/pcie-designware-host.c
+@@ -19,6 +19,7 @@
+ #include <linux/pci.h>
+ #include <linux/pci_regs.h>
+ #include <linux/platform_device.h>
++#include <linux/suspend.h>
+ 
+ #include "../pci-host-common.h"
+ #include "../../pci.h"
+@@ -1221,14 +1222,22 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
+ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
+ {
+ 	bool pme_capable = false;
++	u8 offset;
+ 	int ret = 0;
+ 	u32 val;
+ 
+ 	if (!dw_pcie_link_up(pci))
+ 		goto stop_link;
+ 
+-	if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable))
+-		return 0;
++	if (sm8550_native_sleep_enabled()) {
++		if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable))
++			return 0;
++	} else {
++		offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
++		if (dw_pcie_readw_dbi(pci, offset + PCI_EXP_LNKCTL) &
++		    PCI_EXP_LNKCTL_ASPM_L1)
++			return 0;
++	}
+ 
+ 	if (pci->pp.ops->pme_turn_off) {
+ 		pci->pp.ops->pme_turn_off(&pci->pp);
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+index 484822a..6048c20 100644
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -33,6 +33,7 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+ #include <linux/slab.h>
++#include <linux/suspend.h>
+ #include <linux/types.h>
+ #include <linux/units.h>
+ 
+@@ -289,6 +290,7 @@ struct qcom_pcie {
+ 	const struct qcom_pcie_cfg *cfg;
+ 	struct dentry *debugfs;
+ 	struct list_head ports;
++	bool legacy_suspended;
+ 	bool use_pm_opp;
+ };
+ 
+@@ -701,10 +703,11 @@ static void qcom_pcie_deinit_2_3_2(struct qcom_pcie *pcie)
+ 	struct qcom_pcie_resources_2_3_2 *res = &pcie->res.v2_3_2;
+ 	u32 val;
+ 
+-	/* Force PHY to lowest power state*/
+-	val = readl(pcie->parf + PARF_PHY_CTRL);
+-	val |= PHY_TEST_PWR_DOWN;
+-	writel(val, pcie->parf + PARF_PHY_CTRL);
++	if (sm8550_native_sleep_enabled()) {
++		val = readl(pcie->parf + PARF_PHY_CTRL);
++		val |= PHY_TEST_PWR_DOWN;
++		writel(val, pcie->parf + PARF_PHY_CTRL);
++	}
+ 
+ 	clk_bulk_disable_unprepare(res->num_clks, res->clks);
+ 	regulator_bulk_disable(ARRAY_SIZE(res->supplies), res->supplies);
+@@ -803,10 +806,11 @@ static void qcom_pcie_deinit_2_4_0(struct qcom_pcie *pcie)
+ 	struct qcom_pcie_resources_2_4_0 *res = &pcie->res.v2_4_0;
+ 	u32 val;
+ 
+-	/* Force PHY to lowest power state*/
+-	val = readl(pcie->parf + PARF_PHY_CTRL);
+-	val |= PHY_TEST_PWR_DOWN;
+-	writel(val, pcie->parf + PARF_PHY_CTRL);
++	if (sm8550_native_sleep_enabled()) {
++		val = readl(pcie->parf + PARF_PHY_CTRL);
++		val |= PHY_TEST_PWR_DOWN;
++		writel(val, pcie->parf + PARF_PHY_CTRL);
++	}
+ 
+ 	reset_control_bulk_assert(res->num_resets, res->resets);
+ 	clk_bulk_disable_unprepare(res->num_clks, res->clks);
+@@ -877,10 +881,11 @@ static void qcom_pcie_deinit_2_3_3(struct qcom_pcie *pcie)
+ 	struct qcom_pcie_resources_2_3_3 *res = &pcie->res.v2_3_3;
+ 	u32 val;
+ 
+-	/* Force PHY to lowest power state */
+-	val = readl(pcie->parf + PARF_PHY_CTRL);
+-	val |= PHY_TEST_PWR_DOWN;
+-	writel(val, pcie->parf + PARF_PHY_CTRL);
++	if (sm8550_native_sleep_enabled()) {
++		val = readl(pcie->parf + PARF_PHY_CTRL);
++		val |= PHY_TEST_PWR_DOWN;
++		writel(val, pcie->parf + PARF_PHY_CTRL);
++	}
+ 
+ 	clk_bulk_disable_unprepare(res->num_clks, res->clks);
+ }
+@@ -1105,10 +1110,11 @@ static void qcom_pcie_deinit_2_7_0(struct qcom_pcie *pcie)
+ 	struct qcom_pcie_resources_2_7_0 *res = &pcie->res.v2_7_0;
+ 	u32 val;
+ 
+-	/* Force PHY to lowest power state */
+-	val = readl(pcie->parf + PARF_PHY_CTRL);
+-	val |= PHY_TEST_PWR_DOWN;
+-	writel(val, pcie->parf + PARF_PHY_CTRL);
++	if (sm8550_native_sleep_enabled()) {
++		val = readl(pcie->parf + PARF_PHY_CTRL);
++		val |= PHY_TEST_PWR_DOWN;
++		writel(val, pcie->parf + PARF_PHY_CTRL);
++	}
+ 
+ 	clk_bulk_disable_unprepare(res->num_clks, res->clks);
+ 
+@@ -1215,10 +1221,11 @@ static void qcom_pcie_deinit_2_9_0(struct qcom_pcie *pcie)
+ 	struct qcom_pcie_resources_2_9_0 *res = &pcie->res.v2_9_0;
+ 	u32 val;
+ 
+-	/* Force PHY to lowest power state */
+-	val = readl(pcie->parf + PARF_PHY_CTRL);
+-	val |= PHY_TEST_PWR_DOWN;
+-	writel(val, pcie->parf + PARF_PHY_CTRL);
++	if (sm8550_native_sleep_enabled()) {
++		val = readl(pcie->parf + PARF_PHY_CTRL);
++		val |= PHY_TEST_PWR_DOWN;
++		writel(val, pcie->parf + PARF_PHY_CTRL);
++	}
+ 
+ 	clk_bulk_disable_unprepare(res->num_clks, res->clks);
+ }
+@@ -2079,7 +2086,8 @@ static int qcom_pcie_probe(struct platform_device *pdev)
+ 	 * no resume. Skip that poll (fixed mdelay for L2 entry instead), as
+ 	 * other DWC platforms (e.g. i.MX6) do for the same limitation.
+ 	 */
+-	if (of_device_is_compatible(dev->of_node, "qcom,pcie-sm8550"))
++	if (sm8550_native_sleep_enabled() &&
++	    of_device_is_compatible(dev->of_node, "qcom,pcie-sm8550"))
+ 		pp->skip_l23_ready = true;
+ 
+ 	ret = qcom_pcie_parse_ports(pcie);
+@@ -2145,7 +2153,8 @@ static int qcom_pcie_set_suspend_opp(struct qcom_pcie *pcie)
+ 	unsigned long freq;
+ 	int ret;
+ 
+-	if (!of_device_is_compatible(dev->of_node, "qcom,pcie-sm8550"))
++	if (!sm8550_native_sleep_enabled() ||
++	    !of_device_is_compatible(dev->of_node, "qcom,pcie-sm8550"))
+ 		return dev_pm_opp_set_opp(dev, NULL);
+ 
+ 	freq = dev_pm_opp_get_suspend_opp_freq(dev);
+@@ -2162,6 +2171,76 @@ static int qcom_pcie_set_suspend_opp(struct qcom_pcie *pcie)
+ 	return ret;
+ }
+ 
++static int qcom_pcie_legacy_suspend_noirq(struct device *dev,
++					  struct qcom_pcie *pcie)
++{
++	int ret = 0;
++
++	if (pcie->icc_mem) {
++		ret = icc_set_bw(pcie->icc_mem, 0, kBps_to_icc(1));
++		if (ret) {
++			dev_err(dev,
++				"Failed to set bandwidth for PCIe-MEM interconnect path: %d\n",
++				ret);
++			return ret;
++		}
++	}
++
++	if (!dw_pcie_link_up(pcie->pci)) {
++		qcom_pcie_host_deinit(&pcie->pci->pp);
++		pcie->legacy_suspended = true;
++	}
++
++	if (pm_suspend_target_state != PM_SUSPEND_MEM) {
++		ret = icc_disable(pcie->icc_cpu);
++		if (ret)
++			dev_err(dev,
++				"Failed to disable CPU-PCIe interconnect path: %d\n",
++				ret);
++
++		if (pcie->use_pm_opp)
++			dev_pm_opp_set_opp(pcie->pci->dev, NULL);
++	}
++
++	return ret;
++}
++
++static int qcom_pcie_legacy_resume_noirq(struct device *dev,
++					 struct qcom_pcie *pcie)
++{
++	int ret;
++
++	if (pm_suspend_target_state != PM_SUSPEND_MEM) {
++		if (pcie->use_pm_opp) {
++			ret = qcom_pcie_set_max_opp(dev);
++			if (ret) {
++				dev_err(dev, "Failed to set max OPP: %d\n", ret);
++				return ret;
++			}
++		}
++
++		ret = icc_enable(pcie->icc_cpu);
++		if (ret) {
++			dev_err(dev,
++				"Failed to enable CPU-PCIe interconnect path: %d\n",
++				ret);
++			return ret;
++		}
++	}
++
++	if (pcie->legacy_suspended) {
++		ret = qcom_pcie_host_init(&pcie->pci->pp);
++		if (ret)
++			return ret;
++
++		pcie->legacy_suspended = false;
++	}
++
++	qcom_pcie_icc_opp_update(pcie);
++
++	return 0;
++}
++
+ static int qcom_pcie_suspend_noirq(struct device *dev)
+ {
+ 	struct qcom_pcie *pcie;
+@@ -2170,6 +2249,8 @@ static int qcom_pcie_suspend_noirq(struct device *dev)
+ 	pcie = dev_get_drvdata(dev);
+ 	if (!pcie)
+ 		return 0;
++	if (!sm8550_native_sleep_enabled())
++		return qcom_pcie_legacy_suspend_noirq(dev, pcie);
+ 
+ 	ret = dw_pcie_suspend_noirq(pcie->pci);
+ 	if (ret)
+@@ -2228,6 +2309,8 @@ static int qcom_pcie_resume_noirq(struct device *dev)
+ 	pcie = dev_get_drvdata(dev);
+ 	if (!pcie)
+ 		return 0;
++	if (!sm8550_native_sleep_enabled())
++		return qcom_pcie_legacy_resume_noirq(dev, pcie);
+ 
+ 	if (pcie->pci->suspended) {
+ 		if (pcie->use_pm_opp) {
+diff --git a/drivers/thermal/qcom/tsens.c b/drivers/thermal/qcom/tsens.c
+index f2f2e95..0ac6be5 100644
+--- a/drivers/thermal/qcom/tsens.c
++++ b/drivers/thermal/qcom/tsens.c
+@@ -1173,7 +1173,7 @@ static const struct thermal_zone_device_ops tsens_of_ops = {
+ 
+ static bool tsens_irq_wake_enabled(const char *irqname)
+ {
+-	if (!of_machine_is_compatible("qcom,sm8550"))
++	if (!sm8550_native_sleep_enabled())
+ 		return true;
+ 
+ 	/* Keep critical thermal wake; only passive threshold-window IRQs are noisy. */
+diff --git a/drivers/tty/serial/qcom_geni_serial.c b/drivers/tty/serial/qcom_geni_serial.c
+index 89fd8c6..ce7c190 100644
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -20,6 +20,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/pm_wakeirq.h>
+ #include <linux/soc/qcom/geni-se.h>
++#include <linux/suspend.h>
+ #include <linux/serial.h>
+ #include <linux/serial_core.h>
+ #include <linux/slab.h>
+@@ -1990,6 +1991,7 @@ static int qcom_geni_serial_suspend(struct device *dev)
+ 	 * qcom_geni_serial_resume().
+ 	 */
+ 	if (!uart_console(uport) &&
++	    sm8550_native_sleep_enabled() &&
+ 	    device_property_read_bool(dev, "qcom,mask-irq-on-suspend") &&
+ 	    !device_may_wakeup(dev))
+ 		disable_irq(uport->irq);
+@@ -2015,6 +2017,7 @@ static int qcom_geni_serial_resume(struct device *dev)
+ 	ret = uart_resume_port(private_data->drv, uport);
+ 	/* Balance the disable_irq() taken in qcom_geni_serial_suspend(). */
+ 	if (!uart_console(uport) &&
++	    sm8550_native_sleep_enabled() &&
+ 	    device_property_read_bool(dev, "qcom,mask-irq-on-suspend") &&
+ 	    !device_may_wakeup(dev))
+ 		enable_irq(uport->irq);
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index 7170fd7..1e9bbc3 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -15,6 +15,7 @@
+ #include <linux/of.h>
+ #include <linux/bitfield.h>
+ #include <linux/blk-pm.h>
++#include <linux/suspend.h>
+ #include <linux/blkdev.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+@@ -357,8 +358,7 @@ static void ufshcd_hba_vreg_set_hpm(struct ufs_hba *hba);
+  */
+ static inline bool ufshcd_sm8550_relink_workaround(struct ufs_hba *hba)
+ {
+-	return of_device_is_compatible(hba->dev->of_node,
+-				       "qcom,sm8550-ufshc");
++	return hba->sm8550_native_sleep_workarounds;
+ }
+ 
+ static inline bool ufshcd_relinking(struct ufs_hba *hba)
+@@ -11213,6 +11213,12 @@ int ufshcd_alloc_host(struct device *dev, struct ufs_hba **hba_handle)
+ 	hba = shost_priv(host);
+ 	hba->host = host;
+ 	hba->dev = dev;
++	hba->sm8550_native_sleep_workarounds =
++		sm8550_native_sleep_enabled() &&
++		of_device_is_compatible(dev->of_node, "qcom,sm8550-ufshc");
++	/* SM8550 UFS recovery needs a 3000 ms UIC timeout. */
++	if (hba->sm8550_native_sleep_workarounds)
++		uic_cmd_timeout = 3000;
+ 	hba->dev_ref_clk_freq = REF_CLK_FREQ_INVAL;
+ 	hba->nop_out_timeout = NOP_OUT_TIMEOUT;
+ 	ufshcd_set_sg_entry_size(hba, sizeof(struct ufshcd_sg_entry));
+@@ -11582,7 +11588,7 @@ void ufshcd_resume_complete(struct device *dev)
+ {
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
+ 
+-	if (of_device_is_compatible(hba->dev->of_node, "qcom,sm8550-ufshc") &&
++	if (ufshcd_sm8550_relink_workaround(hba) &&
+ 	    hba->complete_clkgate_hold) {
+ 		hba->complete_clkgate_hold = false;
+ 		ufshcd_release(hba);
+@@ -11646,8 +11652,7 @@ int __ufshcd_suspend_prepare(struct device *dev, bool rpm_ok_for_spm)
+ 			 * Serialize system PM against the asynchronous clock-gating
+ 			 * worker while normal IRQ completion is still available.
+ 			 */
+-			if (of_device_is_compatible(hba->dev->of_node,
+-						    "qcom,sm8550-ufshc")) {
++			if (ufshcd_sm8550_relink_workaround(hba)) {
+ 				ufshcd_hold(hba);
+ 				hba->complete_clkgate_hold = true;
+ 			}
+diff --git a/drivers/ufs/host/ufs-qcom.c b/drivers/ufs/host/ufs-qcom.c
+index 60933a8..ad2c5bc 100644
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -17,6 +17,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/reset-controller.h>
++#include <linux/suspend.h>
+ #include <linux/time.h>
+ #include <linux/unaligned.h>
+ #include <linux/units.h>
+@@ -716,8 +717,7 @@ static int ufs_qcom_cfg_timers(struct ufs_hba *hba, bool is_pre_scale_up, unsign
+ 
+ static bool ufs_qcom_sm8550_suspend_workarounds(struct ufs_hba *hba)
+ {
+-	return of_device_is_compatible(hba->dev->of_node,
+-				       "qcom,sm8550-ufshc");
++	return hba->sm8550_native_sleep_workarounds;
+ }
+ 
+ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+index ea21370..ec36169 100644
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -9,6 +9,7 @@
+ #include <linux/of_device.h>
+ #include <linux/property.h>
+ #include <linux/soc/qcom/pdr.h>
++#include <linux/suspend.h>
+ #include <linux/usb/typec_mux.h>
+ #include <linux/gpio/consumer.h>
+ #include <linux/soc/qcom/pmic_glink.h>
+@@ -376,8 +377,7 @@ static void pmic_glink_ucsi_destroy(void *data)
+ static unsigned long quirk_sc8180x = UCSI_NO_PARTNER_PDOS;
+ static unsigned long quirk_sc8280xp = UCSI_NO_PARTNER_PDOS | UCSI_DELAY_DEVICE_PDOS;
+ static unsigned long quirk_sm8450 = UCSI_DELAY_DEVICE_PDOS;
+-static unsigned long quirk_sm8550 = UCSI_DELAY_DEVICE_PDOS |
+-				     UCSI_QUIESCE_USB_ROLE_SUSPEND;
++static unsigned long quirk_sm8550 = UCSI_DELAY_DEVICE_PDOS;
+ static unsigned long quirk_x1e80100 = UCSI_DELAY_DEVICE_PDOS | UCSI_USB4_IMPLIES_USB;
+ 
+ static const struct of_device_id pmic_glink_ucsi_of_quirks[] = {
+@@ -426,8 +426,12 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
+ 
+ 	match = of_match_device(pmic_glink_ucsi_of_quirks, dev->parent);
+ 	if (match) {
+-		ret = ucsi_set_quirks(ucsi->ucsi,
+-				      *(unsigned long *)match->data);
++		unsigned long quirks = *(unsigned long *)match->data;
++
++		if (sm8550_native_sleep_enabled())
++			quirks |= UCSI_QUIESCE_USB_ROLE_SUSPEND;
++
++		ret = ucsi_set_quirks(ucsi->ucsi, quirks);
+ 		if (ret)
+ 			return ret;
+ 	}
+diff --git a/include/linux/suspend.h b/include/linux/suspend.h
+index b02876f..8e09246 100644
+--- a/include/linux/suspend.h
++++ b/include/linux/suspend.h
+@@ -442,6 +442,12 @@ static inline int is_hibernate_resume_dev(dev_t dev) { return 0; }
+ 
+ extern struct mutex system_transition_mutex;
+ 
++#ifdef CONFIG_PM
++bool sm8550_native_sleep_enabled(void);
++#else
++static inline bool sm8550_native_sleep_enabled(void) { return false; }
++#endif
++
+ #ifdef CONFIG_PM_SLEEP
+ void save_processor_state(void);
+ void restore_processor_state(void);
+diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
+index 6c3b30e..b3d7af3 100644
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -1078,6 +1078,7 @@ enum ufshcd_mcq_opr {
+  * @device_deemphasis_cap: a bitfield to indicate supported DeEmphasis dBs of device's TX lanes,
+  *	cache of device M-PHY TX_HS_DeEmphasis_Setting_Capability Attribute (ID 0x12)
+  * @tx_eq_params: TX Equalization settings
++ * @sm8550_native_sleep_workarounds: whether the opt-in SM8550 UFS path is active
+  */
+ struct ufs_hba {
+ 	void __iomem *mmio_base;
+@@ -1121,6 +1122,7 @@ struct ufs_hba {
+ 	struct timer_list pm_poll_timer;
+ 	unsigned long pm_drain_active;
+ 	bool relink_poll_active;
++	bool sm8550_native_sleep_workarounds;
+ 
+ 	/* Auto-Hibernate Idle Timer register value */
+ 	u32 ahit;
+diff --git a/kernel/power/main.c b/kernel/power/main.c
+index 5429e9f..1aea945 100644
+--- a/kernel/power/main.c
++++ b/kernel/power/main.c
+@@ -10,6 +10,7 @@
+ #include <linux/export.h>
+ #include <linux/init.h>
+ #include <linux/kobject.h>
++#include <linux/of.h>
+ #include <linux/string.h>
+ #include <linux/pm-trace.h>
+ #include <linux/workqueue.h>
+@@ -23,6 +24,33 @@
+ 
+ #include "power.h"
+ 
++static bool sm8550_native_sleep;
++static bool sm8550_machine;
++
++static int __init sm8550_native_sleep_setup(char *value)
++{
++	sm8550_native_sleep = value && !strcmp(value, "1");
++	return 0;
++}
++early_param("sm8550.ns", sm8550_native_sleep_setup);
++
++bool sm8550_native_sleep_enabled(void)
++{
++	return sm8550_native_sleep && sm8550_machine;
++}
++EXPORT_SYMBOL_GPL(sm8550_native_sleep_enabled);
++
++static int __init sm8550_native_sleep_init(void)
++{
++	sm8550_machine = of_machine_is_compatible("qcom,sm8550");
++
++	if (sm8550_native_sleep_enabled())
++		pr_info("PM: SM8550 native-sleep workarounds enabled\n");
++
++	return 0;
++}
++core_initcall(sm8550_native_sleep_init);
++
+ #ifdef CONFIG_PM_SLEEP
+ /*
+  * The following functions are used by the suspend/hibernate code to temporarily
+-- 
+2.55.0
+

@@ -4,7 +4,7 @@ Date: Sun, 19 Jul 2026 00:30:00 +0200
 Subject: [PATCH] usb: typec: ucsi: clear USB role when partner lacks USB
  data
 
-Commit 0c8ee850572 ("usb: typec: ucsi: Add UCSI_USB4_IMPLIES_USB quirk
+Commit 0c8ee850572b6850a78ef4c83af2acd4909a4519 ("usb: typec: ucsi: Add UCSI_USB4_IMPLIES_USB quirk
 for X1E80100") gated the "partner advertises no USB data ->
 USB_ROLE_NONE" decision behind the UCSI_USB4_IMPLIES_USB quirk. On
 ports without that quirk (e.g. SM8750 / AYN Odin 3, pmic_glink UCSI)
@@ -14,14 +14,16 @@ island up, and the deep-suspend firmware power-collapse hard-hangs the
 SoC when the cable is unplugged while suspended: dead screen, the SoC
 runs hot, only a forced reset recovers (7.0.x is fine, 7.1.x hangs).
 
-Restore the pre-0c8ee850572 behaviour: clear the USB role whenever the
-partner advertises no USB data.
+Restore the pre-0c8ee850572 behaviour for ordinary UCSI platforms while
+preserving the intended X1E80100 exception: clear the USB role whenever
+the partner advertises no USB data unless the platform explicitly says
+that a reported USB4 connection implies USB data support.
 
 Signed-off-by: Anze <aanzdev@gmail.com>
 ---
 --- a/drivers/usb/typec/ucsi/ucsi.c
 +++ b/drivers/usb/typec/ucsi/ucsi.c
-@@ -1196,10 +1196,8 @@
+@@ -1196,10 +1196,10 @@
  			typec_partner_set_usb_mode(con->partner, USB_MODE_USB4);
  	}
  
@@ -29,8 +31,10 @@ Signed-off-by: Anze <aanzdev@gmail.com>
 -	    ((con->ucsi->quirks & UCSI_USB4_IMPLIES_USB) &&
 -	     (!(UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN3) ||
 -		UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4)))))
-+	/* Only notify USB controller if partner supports USB data */
-+	if (!(UCSI_CONSTAT(con, PARTNER_FLAG_USB)))
++	if (!UCSI_CONSTAT(con, PARTNER_FLAG_USB) &&
++	    (!(con->ucsi->quirks & UCSI_USB4_IMPLIES_USB) ||
++	     !(UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN3) ||
++	       UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4))))
  		u_role = USB_ROLE_NONE;
  
  	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);

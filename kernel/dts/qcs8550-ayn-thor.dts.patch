@@ -1,6 +1,8 @@
 From: Armada <noreply@armada.local>
-Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientation
+Subject: [PATCH] arm64: dts: qcom: thor: fix hall, touch orientation, and suspend power
 
+diff --git a/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts b/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
+index f89acee..ec8474a 100644
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
 @@ -30,6 +30,8 @@
@@ -21,7 +23,7 @@ Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientati
  
  		label = "top_touchscreen";
  	};
-@@ -393,8 +393,6 @@
+@@ -393,11 +393,11 @@
  
  		touchscreen-size-x = <1080>;
  		touchscreen-size-y = <1240>;
@@ -30,7 +32,12 @@ Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientati
  
  		label = "bottom_touchscreen";
  
-@@ -452,6 +450,15 @@
++		edt,retain-power-in-suspend;
++
+ 		no-regmap-bulk-read;
+ 	};
+ };
+@@ -452,6 +452,15 @@
  		bias-pull-up;
  		output-disable;
  	};

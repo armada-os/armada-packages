@@ -1,0 +1,40 @@
+From: jaewun <jaewun@users.noreply.github.com>
+Subject: [PATCH] soc: qcom: ice: unwind clocks if resume fails
+
+qcom_ice_resume() enables core_clk then iface_clk. If the iface_clk enable
+fails it returns without disabling the core_clk it just enabled, leaking an
+enable reference. The same problem affects both clocks when the subsequent
+BIST poll times out. Unwind every clock enabled by this resume attempt on
+either error path.
+
+Fixes the iface-clock support added in "soc: qcom: ice: allow explicit votes
+on iface clock".
+
+Signed-off-by: jaewun <jaewun@users.noreply.github.com>
+---
+--- a/drivers/soc/qcom/ice.c
++++ b/drivers/soc/qcom/ice.c
+@@ -324,11 +324,21 @@
+ 	err = clk_prepare_enable(ice->iface_clk);
+ 	if (err) {
+ 		dev_err(dev, "Failed to enable iface clock: %d\n", err);
+-		return err;
++		goto disable_core_clk;
+ 	}
+ 	qcom_ice_hwkm_init(ice);
+-	return qcom_ice_wait_bist_status(ice);
++	err = qcom_ice_wait_bist_status(ice);
++	if (err)
++		goto disable_iface_clk;
++
++	return 0;
++
++disable_iface_clk:
++	clk_disable_unprepare(ice->iface_clk);
++disable_core_clk:
++	clk_disable_unprepare(ice->core_clk);
++	return err;
+ }
+ EXPORT_SYMBOL_GPL(qcom_ice_resume);
+ 
+ int qcom_ice_suspend(struct qcom_ice *ice)
