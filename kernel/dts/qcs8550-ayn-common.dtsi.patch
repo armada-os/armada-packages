@@ -1,9 +1,28 @@
 From: Armada <noreply@armada.local>
-Subject: [PATCH] arm64: dts: qcom: qcs8550-ayn: enable SDHCI capabilities and rumble
+Subject: [PATCH] arm64: dts: qcom: qcs8550-ayn: add local hardware fixes
+
+Apply Armada's SDHCI and haptics corrections together with the SM8550 s2idle
+hardware contract used by the experimental native-sleep path.
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayn-common.dtsi
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayn-common.dtsi
-@@ -1462,7 +1462,6 @@
+@@ -26,5 +26,6 @@
+ 
+ / {
++	armada,sm8550-native-sleep;
+ 	chassis-type = "handset";
+ 	rocknix-u-boot-dt-id = "u-boot-odin2";
+ 
+@@ -1098,7 +1099,7 @@
+ };
+
+ &pcieport0 {
+-	wake-gpios = <&tlmm 96 GPIO_ACTIVE_HIGH>;
++	wake-gpios = <&tlmm 96 GPIO_ACTIVE_LOW>;
+ 	reset-gpios = <&tlmm 94 GPIO_ACTIVE_LOW>;
+
+ 	wifi@0 {
+@@ -1462,7 +1463,6 @@
  	no-mmc;
  
  	qcom,dll-config = <0x0007442c>;
@@ -11,11 +30,16 @@ Subject: [PATCH] arm64: dts: qcom: qcs8550-ayn: enable SDHCI capabilities and ru
  
  	status = "okay";
  };
-@@ -1700,6 +1699,7 @@
+@@ -1698,9 +1699,12 @@
+ &uart15 {
+ 	status = "okay";
++	qcom,mask-irq-on-suspend;
  
  	gamepad: gamepad {
  		compatible = "gamepad,rsinput";
++		suspend-mcu-on-system-sleep;
 +		rumble-haptics;
  
  		gamepad-name = "AYN Odin2 Gamepad";
  		gamepad-bus = <0x0003>;
+ 		gamepad-vid = <0x2020>;

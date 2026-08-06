@@ -219,30 +219,14 @@ post-wake rumble.
      if (drv->enable_gpio)
          gpiod_set_value_cansleep(drv->enable_gpio, 0);
  
-@@ -620,6 +648,17 @@
-     regulator_disable(drv->vdd);
- }
+@@ -625,6 +653,10 @@ static int rsinput_suspend(struct device *dev)
+ {
+     struct rsinput_driver *drv = dev_get_drvdata(dev);
  
-+static int rsinput_suspend(struct device *dev)
-+{
-+    struct rsinput_driver *drv = dev_get_drvdata(dev);
-+
 +    /* a pending rumble start must not fire into or after haptics suspend */
 +    if (drv->rumble_work.func)
 +        cancel_work_sync(&drv->rumble_work);
 +
-+    return 0;
-+}
-+
- static int rsinput_resume(struct device *dev)
- {
-     struct rsinput_driver *drv = dev_get_drvdata(dev);
-@@ -627,7 +666,7 @@
-     return rsinput_init_commands(drv);
- }
- 
--static DEFINE_SIMPLE_DEV_PM_OPS(rsinput_pm_ops, NULL, rsinput_resume);
-+static DEFINE_SIMPLE_DEV_PM_OPS(rsinput_pm_ops, rsinput_suspend, rsinput_resume);
- 
- static const struct of_device_id rsinput_of_match[] = {
-     { .compatible = "gamepad,rsinput" },
+     /*
+      * The MCU streams gamepad reports continuously over the UART. If it keeps
+      * sending across the system-suspend teardown, the geni-serial RX interrupt
