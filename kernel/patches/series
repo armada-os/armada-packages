@@ -93,6 +93,11 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch #SM8550_SLEEP
 1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch #SM8550_SLEEP
 1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch #SM8550_SLEEP
+# Pairs with 1011: recovers inline if a hibern8 enter fails anyway. On a Pocket
+# EVO, 1011 alone suspended cleanly at 691s then hung unrecoverably at ~45min.
+# Ported for 7.1.5: hba->system_suspending is absent from struct ufs_hba there
+# and is only captured for the failure log, so it maps to hba->is_sys_suspended.
+1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch #SM8550_SLEEP
 1011-scsi-ufs-hold-clk-gating-across-system-pm.patch #SM8550_SLEEP
 1012-input-edt-ft5x06-retain-power-in-suspend.patch #SM8550_SLEEP
 1013-soc-qcom-ice-unwind-core-clk-on-iface-clk-fail.patch #SM8550_SLEEP
