@@ -517,3 +517,8 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `dts/sm8650-konkr-pf.dts.patch`
   source: armada
   notes: Armada selects the shared WSA2 channel mapping through a Pocket FIT-specific sound-card compatible.
+
+- `patches/0614-iio-imu-add-sns_iio-SSC-bridge.patch`
+  source: https://github.com/ROCKNIX/distribution/pull/3005
+  upstream: local
+  notes: Userspace-fed IIO bridge for Snapdragon Sensor Core. Creates /dev/sns_iio_feed + IIO device bmi323-imu for InputPlumber. Credit ROCKNIX PR 3005 (aanze).
