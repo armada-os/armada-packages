@@ -46,7 +46,6 @@
 0069-input-misc-add-konkr-sysbtn-MCU-system-buttons.patch
 0031_input--Add-driver-for-RSInput-Gamepad.patch
 0006-hid-playstation-expose-DualSense-Edge-Fn-and-back-paddles.patch
-1004-input-rsinput-suspend-resume-gamepad-mcu.patch #SM8550_SLEEP
 0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch
 0506-usbcore-add-interrupt-interval-override.patch
 
@@ -63,6 +62,7 @@
 1001-haptics-driver-support-periodic-sine-and-fixes.patch
 1002-input-rsinput-sm8750-ff.patch
 1003-input-haptics-fix-rumble-bridge-atomic-sleep.patch
+1004-input-rsinput-suspend-resume-gamepad-mcu.patch #SM8550_SLEEP
 1004-input-haptics-stop-zero-amplitude-immediately.patch
 1300-input-rsinput-axis-deadzone.patch
 
@@ -107,6 +107,8 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 1027-arm64-dts-qcom-sm8550-mark-pcie-suspend-opp.patch #SM8550_SLEEP
 1028-armada-scope-sm8550-suspend-workarounds.patch #SM8550_SLEEP
 1029-armada-gate-sm8550-native-sleep-workarounds.patch #SM8550_SLEEP
+# Uses the sm8550.ns-gated UFS helper introduced by 1028 and finalized by 1029.
+1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch #SM8550_SLEEP
 
 # ============== SM8550 DTSI prerequisites ==============
 0001-pcie-update-sm8550-dtsi.patch

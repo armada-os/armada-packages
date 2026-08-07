@@ -10,7 +10,8 @@ Keep the pre-series DWC eligibility test and existing Qualcomm PCIe
 suspend path when the gate is off so merely carrying the patch stack
 does not opt other platforms into D3cold.
 ---
- drivers/input/joystick/rsinput.c              |  39 +++---
+ drivers/input/joystick/rsinput.c              |   4 +-
+ drivers/input/touchscreen/edt-ft5x06.c        |   4 +-
  .../pci/controller/dwc/pcie-designware-host.c |  13 +-
  drivers/pci/controller/dwc/pcie-qcom.c        | 127 +++++++++++++++---
  drivers/thermal/qcom/tsens.c                  |   2 +-
@@ -21,10 +22,9 @@ does not opt other platforms into D3cold.
  include/linux/suspend.h                       |   6 +
  include/ufs/ufshcd.h                          |   2 +
  kernel/power/main.c                           |  28 ++++
- 11 files changed, 192 insertions(+), 59 deletions(-)
+ 12 files changed, 182 insertions(+), 38 deletions(-)
 
 diff --git a/drivers/input/joystick/rsinput.c b/drivers/input/joystick/rsinput.c
-index 9601f6e..25e1602 100644
 --- a/drivers/input/joystick/rsinput.c
 +++ b/drivers/input/joystick/rsinput.c
 @@ -18,6 +18,7 @@
@@ -35,61 +35,37 @@ index 9601f6e..25e1602 100644
  #include <linux/workqueue.h>
  #include <uapi/linux/sched/types.h>
  
-@@ -650,39 +651,31 @@ static void rsinput_remove(struct serdev_device *serdev) {
- 
- static int rsinput_suspend(struct device *dev)
- {
--    struct rsinput_driver *drv = dev_get_drvdata(dev);
-+	struct rsinput_driver *drv = dev_get_drvdata(dev);
- 
--    /* a pending rumble start must not fire into or after haptics suspend */
--    if (drv->rumble_work.func)
--        cancel_work_sync(&drv->rumble_work);
-+	/* Rumble work must stop even when native-sleep handling is gated off. */
-+	if (drv->rumble_work.func)
-+		cancel_work_sync(&drv->rumble_work);
+@@ -656,7 +657,8 @@ static int rsinput_suspend(struct device *dev)
+     if (drv->rumble_work.func)
+         cancel_work_sync(&drv->rumble_work);
  
 -    if (!device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
--        return 0;
-+	if (!sm8550_native_sleep_enabled() ||
-+	    !device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
-+		return 0;
++    if (!sm8550_native_sleep_enabled() ||
++        !device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
+         return 0;
  
--    /*
--     * The MCU streams gamepad reports continuously over the UART. If it keeps
--     * sending across the system-suspend teardown, the geni-serial RX interrupt
--     * storms while the port is being stopped, the primary handler returns
--     * IRQ_NONE, and the kernel's spurious-IRQ detector permanently disables the
--     * UART IRQ -- leaving the gamepad dead after resume until the IRQ is
--     * re-requested. Quiesce the MCU (drop its enable rail and hold it in reset,
--     * mirroring rsinput_remove) so the line goes silent before the UART
--     * suspends; rsinput_resume() re-powers and re-initialises it.
--     */
--    if (drv->enable_gpio)
--        gpiod_set_value_cansleep(drv->enable_gpio, 0);
-+	/* Stop MCU UART traffic before GENI teardown to prevent a stuck IRQ. */
-+	if (drv->enable_gpio)
-+		gpiod_set_value_cansleep(drv->enable_gpio, 0);
+     /*
+diff --git a/drivers/input/touchscreen/edt-ft5x06.c b/drivers/input/touchscreen/edt-ft5x06.c
+--- a/drivers/input/touchscreen/edt-ft5x06.c
++++ b/drivers/input/touchscreen/edt-ft5x06.c
+@@ -30,6 +30,7 @@
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
++#include <linux/suspend.h>
+ #include <linux/uaccess.h>
  
--    if (drv->reset_gpio)
--        gpiod_set_value_cansleep(drv->reset_gpio, 0);
-+	if (drv->reset_gpio)
-+		gpiod_set_value_cansleep(drv->reset_gpio, 0);
+ #include <linux/unaligned.h>
+@@ -1251,7 +1252,8 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client)
+ 	tsdata->no_regmap_bulk_read =
+ 		device_property_read_bool(&client->dev, "no-regmap-bulk-read");
+ 	tsdata->retain_power_in_suspend =
+-		device_property_read_bool(&client->dev,
++		sm8550_native_sleep_enabled() &&
++		device_property_read_bool(&client->dev,
+ 					  "edt,retain-power-in-suspend");
  
--    return 0;
-+	return 0;
- }
- 
- static int rsinput_resume(struct device *dev)
- {
--    struct rsinput_driver *drv = dev_get_drvdata(dev);
-+	struct rsinput_driver *drv = dev_get_drvdata(dev);
- 
--    return rsinput_init_commands(drv);
-+	return rsinput_init_commands(drv);
- }
- 
- static DEFINE_SIMPLE_DEV_PM_OPS(rsinput_pm_ops, rsinput_suspend, rsinput_resume);
+ 	/*
 diff --git a/drivers/pci/controller/dwc/pcie-designware-host.c b/drivers/pci/controller/dwc/pcie-designware-host.c
 index cffb34f..610af8e 100644
 --- a/drivers/pci/controller/dwc/pcie-designware-host.c
@@ -581,4 +557,3 @@ index 5429e9f..1aea945 100644
   * The following functions are used by the suspend/hibernate code to temporarily
 -- 
 2.55.0
-

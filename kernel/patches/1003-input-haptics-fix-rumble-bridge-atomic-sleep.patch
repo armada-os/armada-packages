@@ -19,10 +19,12 @@ Make the bridge process-context only: serialize it with a mutex instead
 of the event_lock. The same mutex now also publishes phapchip, so a
 bridge call cannot race haptics_remove into a use after free. Defer
 RSInput's atomic playback callback to a work item on the freezable
-workqueue, cancel it in RSInput's suspend callback so a stale start
-cannot reach a suspended haptics chip, and flush rather than cancel it
-in remove so the final stop queued by the unregister-time effect flush
-still reaches the hardware. The upload callback already runs in
+workqueue, cancel it in a generic RSInput suspend callback so a stale
+start cannot reach a suspended haptics chip, and flush rather than
+cancel it in remove so the final stop queued by the unregister-time
+effect flush still reaches the hardware. Keep the generic MCU
+reinitialization on resume; the SM8550-only MCU power-down patch extends
+the suspend callback separately. The upload callback already runs in
 sleepable context and calls the bridge directly. Cancel the haptics
 driver's pending stop and set-gain workers on suspend so a timer armed
 before sleep cannot fire into the resume path and race the first
@@ -30,14 +32,11 @@ post-wake rumble.
 
 --- a/drivers/input/misc/qcom-hv-haptics.c
 +++ b/drivers/input/misc/qcom-hv-haptics.c
-@@ -859,6 +859,12 @@
+@@ -859,6 +859,9 @@
  
  static struct haptics_chip *phapchip;
  
-+/*
-+ * Guards phapchip against remove and serializes the exported bridge; the
-+ * bridged ff callbacks sleep, so bridge callers must be in process context.
-+ */
++/* Serializes sleeping bridge callbacks against haptics_remove(). */
 +static DEFINE_MUTEX(haptics_global_lock);
 +
  bool qcom_haptics_vi_sense_is_enabled(void)
@@ -67,7 +66,7 @@ post-wake rumble.
  	struct haptics_play_info *play = &chip->play;
  	int rc;
  
-+	/* Pending workers must not fire into the resume path */
++	/* Pending workers can race the first post-resume rumble. */
 +	cancel_work_sync(&chip->set_gain_work);
 +	cancel_delayed_work_sync(&chip->stop_work);
 +
@@ -178,7 +177,7 @@ post-wake rumble.
  static int rsinput_rumble_upload(struct input_dev *dev,
                                   struct ff_effect *effect,
                                   struct ff_effect *old)
-@@ -418,10 +431,20 @@
+@@ -418,10 +431,17 @@
  
  static int rsinput_rumble_play(struct input_dev *dev, int effect_id, int val)
  {
@@ -188,10 +187,7 @@ post-wake rumble.
          return 0;
  
 -    return qcom_spmi_haptics_global_playback(effect_id, val);
-+    /*
-+     * Called under dev->event_lock and the bridge sleeps; latest request
-+     * wins, and the freezable queue keeps it off a suspending chip.
-+     */
++    /* Input playback holds event_lock; defer the sleeping bridge call. */
 +    WRITE_ONCE(drv->rumble_effect_id, effect_id);
 +    WRITE_ONCE(drv->rumble_val, val);
 +    queue_work(system_freezable_wq, &drv->rumble_work);
@@ -200,7 +196,7 @@ post-wake rumble.
  }
  
  static int rsinput_probe(struct serdev_device *serdev) {
-@@ -578,6 +601,8 @@
+@@ -565,6 +588,8 @@
      input_set_abs_params(drv->input, ABS_RZ, 0, trigger_right_max - trigger_right_antideadzone, 0, 30);
  
      if (device_property_present(&serdev->dev, "rumble-haptics")) {
@@ -209,24 +205,48 @@ post-wake rumble.
          input_set_capability(drv->input, EV_FF, FF_PERIODIC);
  
          error = input_ff_create(drv->input, 1);
-@@ -611,6 +636,9 @@
+@@ -598,6 +623,9 @@
  
      serdev_device_close(serdev);
      input_unregister_device(drv->input);
-+    /* flush, not cancel: unregister queues the final rumble stop */
++    /* Unregister queues the final stop, so flush rather than cancel. */
 +    if (drv->rumble_work.func)
 +        flush_work(&drv->rumble_work);
      if (drv->enable_gpio)
          gpiod_set_value_cansleep(drv->enable_gpio, 0);
  
-@@ -625,6 +653,10 @@ static int rsinput_suspend(struct device *dev)
- {
-     struct rsinput_driver *drv = dev_get_drvdata(dev);
+@@ -607,6 +635,26 @@ static void rsinput_remove(struct serdev_device *serdev) {
+     regulator_disable(drv->vdd);
+ }
  
-+    /* a pending rumble start must not fire into or after haptics suspend */
++static int rsinput_suspend(struct device *dev)
++{
++    struct rsinput_driver *drv = dev_get_drvdata(dev);
++
++    /* Prevent a queued rumble start from crossing haptics suspend. */
 +    if (drv->rumble_work.func)
 +        cancel_work_sync(&drv->rumble_work);
 +
-     /*
-      * The MCU streams gamepad reports continuously over the UART. If it keeps
-      * sending across the system-suspend teardown, the geni-serial RX interrupt
++    return 0;
++}
++
++static int rsinput_resume(struct device *dev)
++{
++    struct rsinput_driver *drv = dev_get_drvdata(dev);
++
++    return rsinput_init_commands(drv);
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(rsinput_pm_ops, rsinput_suspend, rsinput_resume);
++
+ static const struct of_device_id rsinput_of_match[] = {
+     { .compatible = "gamepad,rsinput" },
+     { /* sentinel */ }
+@@ -619,6 +667,7 @@ static struct serdev_device_driver rsinput_driver = {
+     .driver = {
+         .name = "rsinput",
+         .of_match_table = rsinput_of_match,
++        .pm = pm_sleep_ptr(&rsinput_pm_ops),
+     },
+ };
+ 
