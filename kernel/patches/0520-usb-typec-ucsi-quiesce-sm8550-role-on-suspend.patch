@@ -1,0 +1,344 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Armada <noreply@armada.local>
+Date: Thu, 6 Aug 2026 12:00:00 -0400
+Subject: [PATCH] usb: typec: ucsi: quiesce SM8550 USB roles on suspend
+
+The charger-only fix clears a stale USB role when UCSI reports that the
+partner has no data capability. It cannot help when a data-capable cable
+or dock legitimately leaves the controller in host or device mode at
+suspend entry. On the affected Qualcomm handhelds that active role can
+leave the USB power island in a state that is unsafe across low-power
+entry and cable changes.
+
+Add an opt-in UCSI quirk which sets every registered role switch to NONE
+at PM_SUSPEND_PREPARE and restores roles from fresh connector status
+after resume. Mark the instance quiesced before draining delayed connector
+initialization, and keep asynchronous connector work from reasserting a
+role during the suspend transition. If quiescing a switch fails, abort
+suspend instead of entering with an unsafe role.
+
+Keep the PM notifier alive from quirk setup until final UCSI destruction,
+independent of PMIC-GLINK PDR/SSR registration cycles. Serialize connector
+teardown against the notifier so a service restart while suspended cannot
+bypass the quiesce state or race a freed connector array.
+
+Limit the quirk to qcom,sm8550-pmic-glink. The shared UCSI core remains
+unchanged for other platforms. This is an Armada adaptation of the
+approach proposed in ROCKNIX PR #3049, with suspend-failure handling,
+lifecycle cleanup, and status-based resume reconciliation.
+
+Link: https://github.com/ROCKNIX/distribution/pull/3049
+---
+ drivers/usb/typec/ucsi/ucsi.c       | 132 +++++++++++++++++++++++++++-
+ drivers/usb/typec/ucsi/ucsi.h       |   9 ++
+ drivers/usb/typec/ucsi/ucsi_glink.c |  19 +++-
+ 3 files changed, 155 insertions(+), 5 deletions(-)
+
+diff --git a/drivers/usb/typec/ucsi/ucsi.c b/drivers/usb/typec/ucsi/ucsi.c
+index 54ad13a..1b0311f 100644
+--- a/drivers/usb/typec/ucsi/ucsi.c
++++ b/drivers/usb/typec/ucsi/ucsi.c
+@@ -12,6 +12,7 @@
+ #include <linux/module.h>
+ #include <linux/delay.h>
+ #include <linux/slab.h>
++#include <linux/suspend.h>
+ #include <linux/usb/typec_dp.h>
+ #include <linux/usb/typec_tbt.h>
+ 
+@@ -1201,6 +1202,8 @@ static void ucsi_partner_change(struct ucsi_connector *con)
+ 	     !(UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN3) ||
+ 	       UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4))))
+ 		u_role = USB_ROLE_NONE;
++	if (READ_ONCE(con->ucsi->usb_role_suspended))
++		u_role = USB_ROLE_NONE;
+ 
+ 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
+ 	if (ret)
+@@ -1782,6 +1785,8 @@ static int ucsi_register_port(struct ucsi *ucsi, struct ucsi_connector *con)
+ 	/* Only notify USB controller if partner supports USB data */
+ 	if (!(UCSI_CONSTAT(con, PARTNER_FLAG_USB)))
+ 		u_role = USB_ROLE_NONE;
++	if (READ_ONCE(ucsi->usb_role_suspended))
++		u_role = USB_ROLE_NONE;
+ 
+ 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
+ 	if (ret) {
+@@ -1956,6 +1961,99 @@ err:
+ 	return ret;
+ }
+ 
++static int ucsi_pm_resync_connection(struct ucsi_connector *con)
++{
++	bool was_connected = UCSI_CONSTAT(con, CONNECTED);
++	int ret;
++
++	ret = ucsi_check_connection(con);
++	if (ret)
++		return ret;
++
++	if (was_connected && UCSI_CONSTAT(con, CONNECTED))
++		ucsi_partner_change(con);
++
++	return 0;
++}
++
++static void ucsi_usb_role_resync_work(struct work_struct *work)
++{
++	struct ucsi *ucsi = container_of(work, struct ucsi,
++					 usb_role_resync_work);
++	struct ucsi_connector *connector = READ_ONCE(ucsi->connector);
++	struct ucsi_connector *con;
++	int ret;
++
++	if (!connector)
++		return;
++
++	for (con = connector; con->port; con++) {
++		mutex_lock(&con->lock);
++		ret = ucsi_pm_resync_connection(con);
++		mutex_unlock(&con->lock);
++		if (ret)
++			dev_err(ucsi->dev,
++				"con:%d: failed to restore USB role after suspend: %d\n",
++				con->num, ret);
++	}
++}
++
++static int ucsi_pm_notify(struct notifier_block *nb, unsigned long action,
++			  void *data)
++{
++	struct ucsi *ucsi = container_of(nb, struct ucsi, pm_nb);
++	struct ucsi_connector *connector;
++	struct ucsi_connector *con;
++	int notify_ret = NOTIFY_DONE;
++	int ret = 0;
++
++	mutex_lock(&ucsi->pm_lock);
++	switch (action) {
++	case PM_SUSPEND_PREPARE:
++		WRITE_ONCE(ucsi->usb_role_suspended, true);
++		flush_delayed_work(&ucsi->work);
++		connector = READ_ONCE(ucsi->connector);
++		if (!connector) {
++			notify_ret = NOTIFY_OK;
++			break;
++		}
++		for (con = connector; con->port; con++) {
++			mutex_lock(&con->lock);
++			ret = con->usb_role_sw ?
++				usb_role_switch_set_role(con->usb_role_sw,
++							 USB_ROLE_NONE) : 0;
++			mutex_unlock(&con->lock);
++			if (ret) {
++				dev_err(ucsi->dev,
++					"con:%d: failed to quiesce USB role for suspend: %d\n",
++					con->num, ret);
++				WRITE_ONCE(ucsi->usb_role_suspended, false);
++				queue_work(system_long_wq,
++					   &ucsi->usb_role_resync_work);
++				notify_ret = notifier_from_errno(ret);
++				break;
++			}
++		}
++		if (!ret)
++			notify_ret = NOTIFY_OK;
++		break;
++	case PM_POST_SUSPEND:
++		if (!READ_ONCE(ucsi->usb_role_suspended))
++			break;
++		WRITE_ONCE(ucsi->usb_role_suspended, false);
++		if (READ_ONCE(ucsi->connector))
++			queue_work(system_long_wq,
++				   &ucsi->usb_role_resync_work);
++		notify_ret = NOTIFY_OK;
++		break;
++	default:
++		break;
++	}
++	mutex_unlock(&ucsi->pm_lock);
++
++	return notify_ret;
++}
++
+ static void ucsi_resume_work(struct work_struct *work)
+ {
+ 	struct ucsi *ucsi = container_of(work, struct ucsi, resume_work);
+@@ -2100,8 +2198,10 @@ struct ucsi *ucsi_create(struct device *dev, const struct ucsi_operations *ops)
+ 		return ERR_PTR(-ENOMEM);
+ 
+ 	INIT_WORK(&ucsi->resume_work, ucsi_resume_work);
++	INIT_WORK(&ucsi->usb_role_resync_work, ucsi_usb_role_resync_work);
+ 	INIT_DELAYED_WORK(&ucsi->work, ucsi_init_work);
+ 	mutex_init(&ucsi->ppm_lock);
++	mutex_init(&ucsi->pm_lock);
+ 	init_completion(&ucsi->complete);
+ 	ucsi->dev = dev;
+ 	ucsi->ops = ops;
+@@ -2110,12 +2210,35 @@ struct ucsi *ucsi_create(struct device *dev, const struct ucsi_operations *ops)
+ }
+ EXPORT_SYMBOL_GPL(ucsi_create);
+ 
++int ucsi_set_quirks(struct ucsi *ucsi, unsigned long quirks)
++{
++	int ret;
++
++	ucsi->quirks = quirks;
++	if (!(quirks & UCSI_QUIESCE_USB_ROLE_SUSPEND) ||
++	    ucsi->pm_notifier_registered)
++		return 0;
++
++	ucsi->pm_nb.notifier_call = ucsi_pm_notify;
++	ret = register_pm_notifier(&ucsi->pm_nb);
++	if (ret)
++		return ret;
++
++	ucsi->pm_notifier_registered = true;
++	return 0;
++}
++EXPORT_SYMBOL_GPL(ucsi_set_quirks);
++
+ /**
+  * ucsi_destroy - Free UCSI instance
+  * @ucsi: UCSI instance to be freed
+  */
+ void ucsi_destroy(struct ucsi *ucsi)
+ {
++	if (ucsi->pm_notifier_registered)
++		unregister_pm_notifier(&ucsi->pm_nb);
++	WRITE_ONCE(ucsi->usb_role_suspended, false);
++	cancel_work_sync(&ucsi->usb_role_resync_work);
+ 	ucsi_debugfs_unregister(ucsi);
+ 	kfree(ucsi);
+ }
+@@ -2163,6 +2286,9 @@ void ucsi_unregister(struct ucsi *ucsi)
+ 	u64 cmd = UCSI_SET_NOTIFICATION_ENABLE;
+ 	int i;
+ 
++	mutex_lock(&ucsi->pm_lock);
++	cancel_work_sync(&ucsi->usb_role_resync_work);
++
+ 	/* Make sure that we are not in the middle of driver initialization */
+ 	cancel_delayed_work_sync(&ucsi->work);
+ 	cancel_work_sync(&ucsi->resume_work);
+@@ -2170,8 +2296,10 @@ void ucsi_unregister(struct ucsi *ucsi)
+ 	/* Disable notifications */
+ 	ucsi->ops->async_control(ucsi, cmd);
+ 
+-	if (!ucsi->connector)
++	if (!ucsi->connector) {
++		mutex_unlock(&ucsi->pm_lock);
+ 		return;
++	}
+ 
+ 	for (i = 0; i < ucsi->cap.num_connectors; i++) {
+ 		cancel_work_sync(&ucsi->connector[i].work);
+@@ -2205,6 +2333,8 @@ void ucsi_unregister(struct ucsi *ucsi)
+ 	}
+ 
+ 	kfree(ucsi->connector);
++	WRITE_ONCE(ucsi->connector, NULL);
++	mutex_unlock(&ucsi->pm_lock);
+ }
+ EXPORT_SYMBOL_GPL(ucsi_unregister);
+ 
+diff --git a/drivers/usb/typec/ucsi/ucsi.h b/drivers/usb/typec/ucsi/ucsi.h
+index dd64ddc..433f6bb 100644
+--- a/drivers/usb/typec/ucsi/ucsi.h
++++ b/drivers/usb/typec/ucsi/ucsi.h
+@@ -7,6 +7,7 @@
+ #include <linux/bitmap.h>
+ #include <linux/completion.h>
+ #include <linux/device.h>
++#include <linux/notifier.h>
+ #include <linux/power_supply.h>
+ #include <linux/types.h>
+ #include <linux/usb/typec.h>
+@@ -96,6 +97,7 @@ struct ucsi_operations {
+ 
+ struct ucsi *ucsi_create(struct device *dev, const struct ucsi_operations *ops);
+ void ucsi_destroy(struct ucsi *ucsi);
++int ucsi_set_quirks(struct ucsi *ucsi, unsigned long quirks);
+ int ucsi_register(struct ucsi *ucsi);
+ void ucsi_unregister(struct ucsi *ucsi);
+ void *ucsi_get_drvdata(struct ucsi *ucsi);
+@@ -475,6 +477,7 @@ struct ucsi {
+ 	struct ucsi_debugfs_entry *debugfs;
+ 
+ 	struct work_struct resume_work;
++	struct work_struct usb_role_resync_work;
+ 	struct delayed_work work;
+ 	int work_count;
+ #define UCSI_ROLE_SWITCH_RETRY_PER_HZ	10
+@@ -500,6 +503,12 @@ struct ucsi {
+ 
+ /* USB4 connection can imply that USB communcation is supported */
+ #define UCSI_USB4_IMPLIES_USB	BIT(2)
++
++	struct notifier_block pm_nb;
++	struct mutex pm_lock;
++	bool pm_notifier_registered;
++	bool usb_role_suspended;
++#define UCSI_QUIESCE_USB_ROLE_SUSPEND	BIT(3)
+ };
+ 
+ #define UCSI_MAX_DATA_LENGTH(u) (((u)->version < UCSI_VERSION_2_0) ? 0x10 : 0xff)
+diff --git a/drivers/usb/typec/ucsi/ucsi_glink.c b/drivers/usb/typec/ucsi/ucsi_glink.c
+index 12e07b9..ea21370 100644
+--- a/drivers/usb/typec/ucsi/ucsi_glink.c
++++ b/drivers/usb/typec/ucsi/ucsi_glink.c
+@@ -315,13 +315,18 @@ static void pmic_glink_ucsi_register(struct work_struct *work)
+ 	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, register_work);
+ 	unsigned long flags;
+ 	bool pd_running;
++	int ret;
+ 
+ 	spin_lock_irqsave(&ucsi->state_lock, flags);
+ 	pd_running = ucsi->pd_running;
+ 	spin_unlock_irqrestore(&ucsi->state_lock, flags);
+ 
+ 	if (!ucsi->ucsi_registered && pd_running) {
+-		ucsi_register(ucsi->ucsi);
++		ret = ucsi_register(ucsi->ucsi);
++		if (ret) {
++			dev_err(ucsi->dev, "failed to register UCSI: %d\n", ret);
++			return;
++		}
+ 		ucsi->ucsi_registered = true;
+ 	} else if (ucsi->ucsi_registered && !pd_running) {
+ 		ucsi_unregister(ucsi->ucsi);
+@@ -371,6 +376,8 @@ static void pmic_glink_ucsi_destroy(void *data)
+ static unsigned long quirk_sc8180x = UCSI_NO_PARTNER_PDOS;
+ static unsigned long quirk_sc8280xp = UCSI_NO_PARTNER_PDOS | UCSI_DELAY_DEVICE_PDOS;
+ static unsigned long quirk_sm8450 = UCSI_DELAY_DEVICE_PDOS;
++static unsigned long quirk_sm8550 = UCSI_DELAY_DEVICE_PDOS |
++				     UCSI_QUIESCE_USB_ROLE_SUSPEND;
+ static unsigned long quirk_x1e80100 = UCSI_DELAY_DEVICE_PDOS | UCSI_USB4_IMPLIES_USB;
+ 
+ static const struct of_device_id pmic_glink_ucsi_of_quirks[] = {
+@@ -381,7 +388,7 @@ static const struct of_device_id pmic_glink_ucsi_of_quirks[] = {
+ 	{ .compatible = "qcom,sc8280xp-pmic-glink", .data = &quirk_sc8280xp, },
+ 	{ .compatible = "qcom,sm8350-pmic-glink", .data = &quirk_sc8180x, },
+ 	{ .compatible = "qcom,sm8450-pmic-glink", .data = &quirk_sm8450, },
+-	{ .compatible = "qcom,sm8550-pmic-glink", .data = &quirk_sm8450, },
++	{ .compatible = "qcom,sm8550-pmic-glink", .data = &quirk_sm8550, },
+ 	{ .compatible = "qcom,x1e80100-pmic-glink", .data = &quirk_x1e80100, },
+ 	{}
+ };
+@@ -418,8 +425,12 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
+ 		return ret;
+ 
+ 	match = of_match_device(pmic_glink_ucsi_of_quirks, dev->parent);
+-	if (match)
+-		ucsi->ucsi->quirks = *(unsigned long *)match->data;
++	if (match) {
++		ret = ucsi_set_quirks(ucsi->ucsi,
++				      *(unsigned long *)match->data);
++		if (ret)
++			return ret;
++	}
+ 
+ 	ucsi_set_drvdata(ucsi->ucsi, ucsi);
+ 
+-- 
+2.53.0

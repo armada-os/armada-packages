@@ -1,0 +1,207 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] armada: scope SM8550 suspend workarounds
+
+Armada ships one kernel across several Qualcomm SoCs, unlike the per-SoC
+kernels where these suspend workarounds were developed. Restrict the risky
+UFS, GENI UART, and gamepad changes to SM8550 hardware so the
+existing SM8250, SM8650, and SM8750 paths remain unchanged.
+---
+diff --git a/drivers/input/joystick/rsinput.c b/drivers/input/joystick/rsinput.c
+index d9456dd..9601f6e 100644
+--- a/drivers/input/joystick/rsinput.c
++++ b/drivers/input/joystick/rsinput.c
+@@ -656,6 +656,9 @@ static int rsinput_suspend(struct device *dev)
+     if (drv->rumble_work.func)
+         cancel_work_sync(&drv->rumble_work);
+ 
++    if (!device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
++        return 0;
++
+     /*
+      * The MCU streams gamepad reports continuously over the UART. If it keeps
+      * sending across the system-suspend teardown, the geni-serial RX interrupt
+diff --git a/drivers/tty/serial/qcom_geni_serial.c b/drivers/tty/serial/qcom_geni_serial.c
+index 22f0fef..a7768d3 100644
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -1989,7 +1989,9 @@ static int qcom_geni_serial_suspend(struct device *dev)
+ 	 * this disable_irq() is balanced by enable_irq() in
+ 	 * qcom_geni_serial_resume().
+ 	 */
+-	if (!uart_console(uport))
++	if (!uart_console(uport) &&
++	    device_property_read_bool(dev, "qcom,mask-irq-on-suspend") &&
++	    !device_may_wakeup(dev))
+ 		disable_irq(uport->irq);
+ 
+ 	/*
+@@ -2012,7 +2014,9 @@ static int qcom_geni_serial_resume(struct device *dev)
+ 
+ 	ret = uart_resume_port(private_data->drv, uport);
+ 	/* Balance the disable_irq() taken in qcom_geni_serial_suspend(). */
+-	if (!uart_console(uport))
++	if (!uart_console(uport) &&
++	    device_property_read_bool(dev, "qcom,mask-irq-on-suspend") &&
++	    !device_may_wakeup(dev))
+ 		enable_irq(uport->irq);
+ 	if (uart_console(uport)) {
+ 		geni_icc_set_tag(&port->se, QCOM_ICC_TAG_ALWAYS);
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+index 59f988b..f366c98 100644
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -355,10 +355,17 @@ static void ufshcd_hba_vreg_set_hpm(struct ufs_hba *hba);
+  * than UFSHCD_STATE_RESET so generic resets/probe are unaffected. Lock-free
+  * cross-context reads -> READ_ONCE.
+  */
++static inline bool ufshcd_sm8550_relink_workaround(struct ufs_hba *hba)
++{
++	return of_device_is_compatible(hba->dev->of_node,
++				       "qcom,sm8550-ufshc");
++}
++
+ static inline bool ufshcd_relinking(struct ufs_hba *hba)
+ {
+-	return READ_ONCE(hba->pm_op_in_progress) ||
+-	       READ_ONCE(hba->relink_poll_active);
++	return ufshcd_sm8550_relink_workaround(hba) &&
++	       (READ_ONCE(hba->pm_op_in_progress) ||
++	        READ_ONCE(hba->relink_poll_active));
+ }
+ 
+ void ufshcd_enable_irq(struct ufs_hba *hba)
+@@ -1985,7 +1992,7 @@ static void ufshcd_ungate_work(struct work_struct *work)
+ 		hba->clk_gating.is_suspended = true;
+ 		if (ufshcd_is_link_hibern8(hba)) {
+ 			ret = ufshcd_uic_hibern8_exit(hba);
+-			if (ret) {
++			if (ret && ufshcd_sm8550_relink_workaround(hba)) {
+ 				/*
+ 				 * This SW clk-gating hibern8 exit runs outside
+ 				 * pm_op_in_progress. During the freezer phase,
+@@ -2009,7 +2016,10 @@ static void ufshcd_ungate_work(struct work_struct *work)
+ 				if (ret)
+ 					dev_err(hba->dev, "%s: link recovery after hibern8 exit failed %d\n",
+ 						__func__, ret);
+-			} else {
++			} else if (ret) {
++				dev_err(hba->dev, "%s: hibern8 exit failed %d\n",
++					__func__, ret);
++			} else {
+ 				ufshcd_set_link_active(hba);
+ 			}
+ 		}
+@@ -4479,7 +4486,9 @@ out:
+ 	 * exit. That path runs outside pm_op_in_progress during the freezer
+ 	 * phase; ufshcd_ungate_work handles recovery inline instead.
+ 	 */
+-	if (ret && !hba->pm_op_in_progress && !hba->clk_gating.is_suspended) {
++	if (ret && !hba->pm_op_in_progress &&
++	    (!ufshcd_sm8550_relink_workaround(hba) ||
++	     !hba->clk_gating.is_suspended)) {
+ 		ufshcd_set_link_broken(hba);
+ 		ufshcd_schedule_eh_work(hba);
+ 	}
+@@ -6601,7 +6610,7 @@ static void ufshcd_complete_requests(struct ufs_hba *hba, bool force_compl)
+ {
+ 	if (hba->mcq_enabled)
+ 		ufshcd_mcq_compl_pending_transfer(hba, force_compl);
+-	else if (force_compl)
++	else if (force_compl && ufshcd_sm8550_relink_workaround(hba))
+ 		/*
+ 		 * The controller has been reset; complete every outstanding
+ 		 * request (the doorbell no longer reflects them) so no request
+@@ -7090,7 +7099,7 @@ do_reset:
+ 		 * is clear, so ufshcd_relinking() gates the drain and nosync IRQ
+ 		 * disable while the reset is in progress.
+ 		 */
+-		if (!hba->mcq_enabled) {
++		if (!hba->mcq_enabled && ufshcd_sm8550_relink_workaround(hba)) {
+ 			WRITE_ONCE(hba->relink_poll_active, true);
+ 			mod_timer(&hba->pm_poll_timer, jiffies + msecs_to_jiffies(2));
+ 		}
+@@ -10641,7 +10650,7 @@ static int __ufshcd_wl_resume(struct ufs_hba *hba, enum ufs_pm_op pm_op)
+ 	 * oneshot-masked, the timer drains UIC/UTP completions from the arch timer
+ 	 * instead. Disarmed at out: before PM state is released.
+ 	 */
+-	if (!hba->mcq_enabled)
++	if (!hba->mcq_enabled && ufshcd_sm8550_relink_workaround(hba))
+ 		mod_timer(&hba->pm_poll_timer, jiffies + msecs_to_jiffies(2));
+ 
+ 	/* For DeepSleep, the only supported option is to have the link off */
+@@ -10726,10 +10735,14 @@ out:
+ 	 * synchronously delete it. From here normal IRQ delivery resumes: the
+ 	 * now-runnable threaded handler drains any remaining IS and unmasks the line.
+ 	 */
+-	hba->pm_op_in_progress = false;
+-	timer_delete_sync(&hba->pm_poll_timer);
++	if (ufshcd_sm8550_relink_workaround(hba)) {
++		hba->pm_op_in_progress = false;
++		timer_delete_sync(&hba->pm_poll_timer);
++	}
+ 	hba->clk_gating.is_suspended = false;
+ 	ufshcd_release(hba);
++	if (!ufshcd_sm8550_relink_workaround(hba))
++		hba->pm_op_in_progress = false;
+ 	return ret;
+ }
+ 
+diff --git a/drivers/ufs/host/ufs-qcom.c b/drivers/ufs/host/ufs-qcom.c
+index c1d464c..60933a8 100644
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -714,6 +714,12 @@ cfg_timers:
+ 	return 0;
+ }
+ 
++static bool ufs_qcom_sm8550_suspend_workarounds(struct ufs_hba *hba)
++{
++	return of_device_is_compatible(hba->dev->of_node,
++				       "qcom,sm8550-ufshc");
++}
++
+ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
+ 					enum ufs_notify_change_status status)
+ {
+@@ -723,7 +729,9 @@ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
+ 
+ 	switch (status) {
+ 	case PRE_CHANGE:
+-		linecfg_err = qcom_qmp_ufs_ctrl_rx_linecfg(host->generic_phy, true);
++		linecfg_err = ufs_qcom_sm8550_suspend_workarounds(hba) ?
++			qcom_qmp_ufs_ctrl_rx_linecfg(host->generic_phy, true) :
++			-EOPNOTSUPP;
+ 		if (linecfg_err && linecfg_err != -EOPNOTSUPP)
+ 			dev_warn(hba->dev, "failed to enable RX LineCfg: %d\n",
+ 				 linecfg_err);
+@@ -748,7 +756,9 @@ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
+ 
+ 		break;
+ 	case POST_CHANGE:
+-		linecfg_err = qcom_qmp_ufs_ctrl_rx_linecfg(host->generic_phy, false);
++		linecfg_err = ufs_qcom_sm8550_suspend_workarounds(hba) ?
++			qcom_qmp_ufs_ctrl_rx_linecfg(host->generic_phy, false) :
++			-EOPNOTSUPP;
+ 		if (linecfg_err && linecfg_err != -EOPNOTSUPP)
+ 			dev_warn(hba->dev, "failed to disable RX LineCfg: %d\n",
+ 				 linecfg_err);
+@@ -1339,7 +1349,8 @@ static void ufs_qcom_advertise_quirks(struct ufs_hba *hba)
+ 	 * The two mechanisms are mutually exclusive; keep the SW clk-gating
+ 	 * path and disable HW auto-hibern8.
+ 	 */
+-	if (hba->caps & UFSHCD_CAP_HIBERN8_WITH_CLK_GATING)
++	if (ufs_qcom_sm8550_suspend_workarounds(hba) &&
++	    hba->caps & UFSHCD_CAP_HIBERN8_WITH_CLK_GATING)
+ 		hba->quirks |= UFSHCD_QUIRK_BROKEN_AUTO_HIBERN8;
+ }
+ 
+@@ -1472,7 +1483,8 @@ static int ufs_qcom_setup_clocks(struct ufs_hba *hba, bool on,
+ 	 * Keep the PHY powered when the link is only parked in HIBERN8; true
+ 	 * LINK_OFF still powers the PHY off and recalibrates on resume.
+ 	 */
+-	keep_phy = drvdata && drvdata->no_phy_retention &&
++	keep_phy = ufs_qcom_sm8550_suspend_workarounds(hba) &&
++		   drvdata && drvdata->no_phy_retention &&
+ 		   ufs_qcom_is_link_hibern8(hba);
+ 
+ 	switch (status) {
