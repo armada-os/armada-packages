@@ -37,7 +37,7 @@ new file mode 100644
 index 0000000..f66adc811
 --- /dev/null
 +++ b/drivers/input/joystick/mcu_joystick.c
-@@ -0,0 +1,763 @@
+@@ -0,0 +1,775 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * AYANEO SPI MCU gamepad driver (KONKR Pocket FIT Elite / AYN AYANEO SM8750 family)
@@ -144,12 +144,12 @@ index 0000000..f66adc811
 +static unsigned int r3_debounce_ms = 50;
 +module_param(r3_debounce_ms, uint, 0644);
 +MODULE_PARM_DESC(r3_debounce_ms,
-+		 "Minimum R3 press duration in ms before reporting it (0 disables)");
++		 "Minimum R3 press duration on affected devices in ms (0 disables)");
 +
 +static unsigned int trigger_confirm_frames = 2;
 +module_param(trigger_confirm_frames, uint, 0644);
 +MODULE_PARM_DESC(trigger_confirm_frames,
-+		 "Consecutive non-zero trigger frames required before reporting (1 disables)");
++		 "Non-zero trigger frames required on affected devices (1 disables)");
 +
 +#define MCU_POLL_MS		16	/* ~60 Hz fallback poll (only when the IRQ is quiet) */
 +#define MCU_IRQ_OK_MS		50	/* if the IRQ delivered a frame within this
@@ -208,6 +208,7 @@ index 0000000..f66adc811
 +	unsigned int bad_frames;
 +	unsigned int reinit_fails;
 +	bool dead;
++	bool input_filter_enabled;
 +	unsigned int trig_left_nonzero_frames;
 +	unsigned int trig_right_nonzero_frames;
 +	bool r3_raw_down;
@@ -434,23 +435,30 @@ index 0000000..f66adc811
 +	input_report_abs(in, ABS_RY, (s16)~regs[MCU_FRAME_RZ]);
 +	/* trigger reg: low byte = left (ABS_Z), high byte = right (ABS_RZ);
 +	 * stock also reports digital TL2/TR2 at full deflection */
-+	left_trigger = mcu_filter_trigger(regs[MCU_FRAME_TRIG] & 0xff,
-+					 &mcu->trig_left_nonzero_frames);
-+	right_trigger = mcu_filter_trigger(regs[MCU_FRAME_TRIG] >> 8,
-+					  &mcu->trig_right_nonzero_frames);
++	if (mcu->input_filter_enabled) {
++		left_trigger = mcu_filter_trigger(regs[MCU_FRAME_TRIG] & 0xff,
++						 &mcu->trig_left_nonzero_frames);
++		right_trigger = mcu_filter_trigger(regs[MCU_FRAME_TRIG] >> 8,
++						  &mcu->trig_right_nonzero_frames);
++	} else {
++		left_trigger = regs[MCU_FRAME_TRIG] & 0xff;
++		right_trigger = regs[MCU_FRAME_TRIG] >> 8;
++	}
 +	input_report_abs(in, ABS_Z, left_trigger);
 +	input_report_abs(in, ABS_RZ, right_trigger);
 +	input_report_key(in, BTN_TL2, left_trigger == 0xff);
 +	input_report_key(in, BTN_TR2, right_trigger == 0xff);
 +
 +	for (i = 0; i < ARRAY_SIZE(mcu_btn_map); i++) {
-+		if (mcu_btn_map[i].code == BTN_THUMBR)
++		if (mcu->input_filter_enabled &&
++		    mcu_btn_map[i].code == BTN_THUMBR)
 +			continue;
 +		input_report_key(in, mcu_btn_map[i].code,
 +				 !!(key & BIT(mcu_btn_map[i].bit)));
 +	}
 +
-+	mcu_report_r3(mcu, !!(key & BIT(11)));
++	if (mcu->input_filter_enabled)
++		mcu_report_r3(mcu, !!(key & BIT(11)));
 +
 +	input_report_abs(in, ABS_HAT0X,
 +			 !!(key & MCU_DPAD_RIGHT) - !!(key & MCU_DPAD_LEFT));
@@ -592,6 +600,10 @@ index 0000000..f66adc811
 +	mcu->spi = spi;
 +	mutex_init(&mcu->io_lock);
 +	spi_set_drvdata(spi, mcu);
++	mcu->input_filter_enabled =
++		of_machine_is_compatible("konkr,pocket-fit-elite");
++	if (mcu->input_filter_enabled)
++		dev_info(dev, "enabling Pocket FIT Elite input glitch filter\n");
 +
 +	/*
 +	 * The MCU runs in SPI mode 3 (CPOL=1/CPHA=1) — confirmed from the stock
