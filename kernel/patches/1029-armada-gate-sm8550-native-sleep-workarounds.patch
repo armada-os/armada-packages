@@ -466,7 +466,7 @@ index ea21370..ec36169 100644
 +		unsigned long quirks = *(unsigned long *)match->data;
 +
 +		if (sm8550_native_sleep_enabled())
-+			quirks |= UCSI_QUIESCE_USB_ROLE_SUSPEND;
++			quirks &= ~UCSI_QUIESCE_USB_ROLE_SUSPEND;
 +
 +		ret = ucsi_set_quirks(ucsi->ucsi, quirks);
  		if (ret)
