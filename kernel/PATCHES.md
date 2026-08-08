@@ -6,6 +6,14 @@ commit, or `armada` for original work; a URL source with no `notes` is verbatim.
 A patch entry's `upstream` is `local` for an Armada-authored change, `unknown` when
 no equivalent submission was found, or a permanent URL to the upstream submission.
 
+## SM8550_SLEEP patch set
+
+Kernel members carry an inline `#SM8550_SLEEP` tag in `patches/series`; run
+`rg '#SM8550_SLEEP' kernel/patches/series` from the repository root to list the
+complete ordered set. The separately applied board deltas are
+`dts/qcs8550-ayn-common.dtsi.patch` and `dts/qcs8550-ayn-thor.dts.patch`.
+Patch `1029` is the final boot gate and must remain after every tagged member.
+
 - `patches/0002-qcom-dispcc-sm8550-Fix-disp_cc_mdss_mdp_clk_src.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0002-qcom-dispcc-sm8550-Fix-disp_cc_mdss_mdp_clk_src.patch
   upstream: unknown
@@ -136,9 +144,10 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/packages/linux/patches/mainline/0006-hid-playstation-expose-DualSense-Edge-Fn-and-back-paddles.patch
   upstream: https://lore.kernel.org/r/20260407044008.40222-1-awebster@gmail.com
   notes: Armada refreshed only the hunk context for Linux 7.1; DualSense Edge button behavior is unchanged.
-- `patches/0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch`
-  source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch
+- `patches/1004-input-rsinput-suspend-resume-gamepad-mcu.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/d9b27e08df7c3c35635a7ff405efeab22207df5a/projects/ROCKNIX/devices/SM8550/patches/linux/1004-input-rsinput-suspend-resume-gamepad-mcu.patch
   upstream: unknown
+  notes: Replaces the resume-only SM8750 patch with ROCKNIX's combined SM8550 suspend/resume implementation. `1028` limits MCU power-down to board nodes that opt in; resume reinitialization remains shared. #SM8550_SLEEP
 - `patches/0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8250/patches/linux/0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch
   upstream: unknown
@@ -167,7 +176,7 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/1003-input-haptics-fix-rumble-bridge-atomic-sleep.patch`
   source: armada
   upstream: local
-  notes: The imported bridge called the haptics driver's sleeping upload, playback, and erase callbacks under spin_lock_irq, which emitted "BUG: scheduling while atomic" on every rumble stop and intermittently hard-locked the Odin 3 (reproduced on hardware). The bridge now serializes with a mutex and is process-context only, RSInput defers its atomic playback callback to a work item, and the haptics suspend path cancels the pending stop and set-gain workers so they cannot fire into resume. ROCKNIX carries the identical bug as of 2026-08-04; worth upstreaming once soak-tested.
+  notes: The imported bridge called the haptics driver's sleeping upload, playback, and erase callbacks under spin_lock_irq, which emitted "BUG: scheduling while atomic" on every rumble stop and intermittently hard-locked the Odin 3 (reproduced on hardware). The bridge now serializes with a mutex and is process-context only, RSInput defers its atomic playback callback to a work item, and the haptics suspend path cancels the pending stop and set-gain workers so they cannot fire into resume. This generic patch owns RSInput's PM callbacks: pending rumble work is always canceled on suspend and MCU initialization remains unconditional on resume. The tagged SM8550 patch only extends suspend with the opt-in MCU power-down, so removing the sleep stack does not break patch application or regress Odin 3 PM behavior. ROCKNIX carries the identical bug as of 2026-08-04; worth upstreaming once soak-tested.
 - `patches/1004-input-haptics-stop-zero-amplitude-immediately.patch`
   source: armada
   upstream: local
@@ -212,6 +221,94 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0505-msm_gem-lock-before-put_iova_spaces.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8250/patches/linux/0505-msm_gem-lock-before-put_iova_spaces.patch
   upstream: unknown
+- `patches/0201-scsi-ufs-drain-relink-completions-out-of-band-pm.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/9fb3c21c3d37345b8741a6d86da7471b6041b024/projects/ROCKNIX/devices/SM8550/patches/linux/0201-scsi-ufs-drain-relink-completions-out-of-band-pm.patch
+  upstream: unknown
+  notes: Large downstream non-MCQ UFS relink workaround. `1028` gates its polling, reset-completion, inline-recovery, and resume-order changes to `qcom,sm8550-ufshc` so they do not alter Armada's other SoCs. #SM8550_SLEEP
+- `patches/0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/21e1c0be7c9d4a1fba300ce5a81c06a4f91d537f/projects/ROCKNIX/devices/SM8550/patches/linux/0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch
+  upstream: unknown
+  notes: #SM8550_SLEEP
+- `patches/0207-scsi-ufs-qcom-balance-irq-on-host-reset-error.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/9fb3c21c3d37345b8741a6d86da7471b6041b024/projects/ROCKNIX/devices/SM8550/patches/linux/0207-scsi-ufs-qcom-balance-irq-on-host-reset-error.patch
+  upstream: unknown
+  notes: #SM8550_SLEEP
+- `patches/1006-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/aa7d8320421bd44ec5b46b2d852b544fec237c54/projects/ROCKNIX/devices/SM8550/patches/linux/1006-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch
+  upstream: unknown
+  notes: `1028` requires a per-controller DT opt-in and refuses console or wake-capable UARTs; only the SM8550 AYN/Retroid gamepad UART opts in. #SM8550_SLEEP
+- `patches/1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/9fb3c21c3d37345b8741a6d86da7471b6041b024/projects/ROCKNIX/devices/SM8550/patches/linux/1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch
+  upstream: unknown
+  notes: #SM8550_SLEEP
+- `patches/1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/9fb3c21c3d37345b8741a6d86da7471b6041b024/projects/ROCKNIX/devices/SM8550/patches/linux/1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch
+  upstream: unknown
+  notes: #SM8550_SLEEP
+- `patches/1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/9fb3c21c3d37345b8741a6d86da7471b6041b024/projects/ROCKNIX/devices/SM8550/patches/linux/1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch
+  upstream: unknown
+  notes: #SM8550_SLEEP
+- `patches/1011-scsi-ufs-hold-clk-gating-across-system-pm.patch`
+  source: https://github.com/gh123man/armada-packages/blob/b097724ec20b3f20d31dd4cc291e0d5d9238c491/kernel/patches/1011-scsi-ufs-hold-clk-gating-across-system-pm.patch
+  upstream: unknown
+  notes: Armada retains the small, balanced fix for a hardware-captured gate-worker/system-PM race and gates both the hold and release to `qcom,sm8550-ufshc`. #SM8550_SLEEP
+- `patches/1012-input-edt-ft5x06-retain-power-in-suspend.patch`
+  source: https://github.com/thorch-os/thorch/blob/893d10bdae1523612126f051399e9b525ff51286/packages/linux-thorch/patches/0016-input-edt-ft5x06-retain-power-in-suspend.patch
+  upstream: unknown
+  notes: Adds a board opt-in that keeps a touchscreen powered through system suspend without incorrectly arming its touch IRQ as a wake source. Only AYN Thor's lower FT5452 node opts in, and `1029` ignores that property unless the global native-sleep gate is active. #SM8550_SLEEP
+- `patches/1013-soc-qcom-ice-unwind-core-clk-on-iface-clk-fail.patch`
+  source: https://github.com/thorch-os/thorch/blob/893d10bdae1523612126f051399e9b525ff51286/packages/linux-thorch/patches/0006-soc-qcom-ice-unwind-core-clk-on-iface-clk-fail.patch
+  upstream: unknown
+  notes: Error-path fix for Linux 7.1.5's existing SM8550 ICE iface clock and power-domain support. It retains the source patch's core-clock unwind when iface-clock enable fails and adds an Armada follow-up that unwinds both clocks if the subsequent BIST poll times out. #SM8550_SLEEP
+- `patches/1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/9fb3c21c3d37345b8741a6d86da7471b6041b024/projects/ROCKNIX/devices/SM8550/patches/linux/1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch
+  upstream: unknown
+  notes: `1028` limits the new RX LineCfg handling and other QCOM UFS runtime changes to the SM8550 UFS compatible. #SM8550_SLEEP
+- `patches/1017-pci-host-common-add-d3cold-possible.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0210-PCI-host-common-add-d3cold-eligibility-helper.patch
+  upstream: https://lore.kernel.org/r/20260429-d3cold-v5-1-89e9735b9df6@oss.qualcomm.com
+  notes: Retains Thorch's hardware-validated endpoint-only eligibility behavior because Armada boots with `pcie_ports=compat`. #SM8550_SLEEP
+- `patches/1018-pci-qcom-add-get-ltssm.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0211-PCI-qcom-add-get_ltssm-helper.patch
+  upstream: https://lore.kernel.org/r/20260429-d3cold-v5-2-89e9735b9df6@oss.qualcomm.com
+  notes: #SM8550_SLEEP
+- `patches/1019-pci-qcom-power-down-phy.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0212-PCI-qcom-power-down-phy-via-PARF_PHY_CTRL.patch
+  upstream: https://lore.kernel.org/r/20260429-d3cold-v5-3-89e9735b9df6@oss.qualcomm.com
+  notes: #SM8550_SLEEP
+- `patches/1020-pci-dwc-use-common-d3cold-helper.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0213-PCI-dwc-use-d3cold-eligibility-helper-in-suspend-path.patch
+  upstream: https://lore.kernel.org/r/20260429-d3cold-v5-4-89e9735b9df6@oss.qualcomm.com
+  notes: #SM8550_SLEEP
+- `patches/1021-pci-qcom-add-d3cold-support.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0214-PCI-qcom-add-d3cold-support.patch
+  upstream: https://lore.kernel.org/r/20260429-d3cold-v5-5-89e9735b9df6@oss.qualcomm.com
+  notes: #SM8550_SLEEP
+- `patches/1023-pci-qcom-skip-l23-ready-after-pme-sm8550.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0215-PCI-qcom-skip-l23-ready-after-pme-sm8550.patch
+  upstream: unknown
+  notes: Armada fixes the source patch's misleading global behavior by checking the `qcom,pcie-sm8550` compatible. #SM8550_SLEEP
+- `patches/1026-pci-qcom-use-suspend-opp-for-non-s2ram.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0220-PCI-qcom-use-suspend-opp-for-non-s2ram.patch
+  upstream: unknown
+  notes: Armada preserves the original NULL OPP behavior outside `qcom,pcie-sm8550`. #SM8550_SLEEP
+- `patches/1027-arm64-dts-qcom-sm8550-mark-pcie-suspend-opp.patch`
+  source: https://github.com/thorch-os/thorch/blob/bf390e3d3be4bbdf6eb22f0a78be009ad07673c3/packages/linux-thorch/patches/0221-arm64-dts-qcom-sm8550-mark-pcie-suspend-opp.patch
+  upstream: unknown
+  notes: #SM8550_SLEEP
+- `patches/1028-armada-scope-sm8550-suspend-workarounds.patch`
+  source: armada
+  upstream: local
+  notes: Armada's shared kernel serves SM8250, SM8550, SM8650, and SM8750. This follow-up confines downstream UFS recovery, gamepad MCU power-down, and GENI IRQ behavior to explicit SM8550 compatibles/properties. The broad RPMh regulator sleep-vote patches from Thorch are deliberately excluded from the first hardware-test set. #SM8550_SLEEP
+- `patches/1029-armada-gate-sm8550-native-sleep-workarounds.patch`
+  source: armada
+  upstream: local
+  notes: Requires the exact `sm8550.ns=1` boot argument on a machine compatible with `qcom,sm8550` before enabling the experimental UFS, PCIe D3cold/PHY/OPP, TSENS wake, GENI, RSInput MCU power-down, or touchscreen-retention behavior. Generic RSInput rumble cancellation and resume-time MCU initialization remain unconditional. The root compatible is resolved once during core init and each UFS host caches its compatible match at probe, so interrupt and clock-gating paths only read booleans. An opted-in SM8550 UFS host also selects the validated 3000 ms UIC timeout before issuing its first command. With the argument absent, generic DWC PCIe retains its pre-series eligibility test, Qualcomm PCIe follows its pre-D3cold suspend implementation, and the other workarounds remain inert. This patch explicitly clears `UCSI_QUIESCE_USB_ROLE_SUSPEND` even when the native-sleep gate is active because some SM8550 devices hang when waking while plugged in. Intentional unconditional changes are the corrected generic UCSI charger role, UFS/ICE error propagation and unwind, the DWC suspended-flag timing fix, and Qualcomm pwrctrl device reuse across resume. #SM8550_SLEEP
+- `patches/1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch`
+  source: https://github.com/gh123man/armada-packages/commit/2275305ddea13abb59f9e428299f8c84dfafc79a
+  upstream: unknown
+  notes: The source commit adds inline recovery for a failed clock-gating Hibern8 enter and disables UFS clock gating after the first failure; its [diagnostic follow-up](https://github.com/gh123man/armada-packages/commit/aff0cbc95d14b5e58f20162effe9f08aa5d2206c) adds the gate-race snapshots carried here. Armada orders the patch after `1029` and restricts its recovery, polling, and state changes to the cached `sm8550.ns=1` UFS gate; without the gate it preserves the original UFS failure path. A dedicated recovery-active flag suppresses the competing generic UIC error handler without writing the shared `clk_gating.is_suspended` PM state. #SM8550_SLEEP
 - `patches/0001-pcie-update-sm8550-dtsi.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0001-pcie-update-sm8550-dtsi.patch
   upstream: https://lore.kernel.org/r/20260611-wake-v2-33-2744251b1181@oss.qualcomm.com
@@ -395,6 +492,11 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0519-usb-typec-ucsi-clear-USB-role.patch`
   source: https://github.com/ROCKNIX/distribution/commit/c9629c95a5655dcfb68e8f3aaf75f9967a9e9656
   upstream: unknown
+  notes: ROCKNIX's charger-only regression fix is hardware-validated on Armada's SM8750 Odin 3. Armada corrects its condition so non-quirk platforms restore the pre-regression behavior while X1E80100 still treats reported USB4 Gen 3/4 as implying USB data support.
+- `patches/0520-usb-typec-ucsi-quiesce-sm8550-role-on-suspend.patch`
+  source: https://github.com/ROCKNIX/distribution/pull/3049
+  upstream: unknown
+  notes: Armada adapts the proposed data-capable-partner fix for `qcom,sm8550-pmic-glink`. The implementation marks UCSI quiesced before draining delayed connector initialization, quiesces USB role switches before suspend, aborts suspend if quiescing fails, blocks connector work from restoring a role during the transition, and reconciles roles from fresh connector status after resume. The notifier and quiesce state survive PMIC-GLINK PDR/SSR cycles, with connector teardown serialized against PM callbacks. Activation is disabled by `1029` because some SM8550 devices hang when waking while plugged in with an active `device` USB role; the code remains compiled but `UCSI_QUIESCE_USB_ROLE_SUSPEND` is cleared even when `sm8550.ns=1`. #SM8550_SLEEP
 - `patches/0517-usb-typec-mux-dont-swallow-EPROBE_DEFER.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0517-usb-typec-mux-dont-swallow-EPROBE_DEFER.patch
   upstream: unknown
@@ -501,13 +603,13 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketds.dts`.
 - `dts/qcs8550-ayn-common.dtsi.patch`
   source: armada
-  notes: Armada removes the SDHCI capability mask and marks the shared RSInput node as connected to the PM8550B haptics device declared in the same common tree. This intentionally covers the AYN and Retroid products that inherit both nodes, including Pocket 6 and Nova.
+  notes: Armada removes the SDHCI capability mask, marks the shared RSInput node as connected to the PM8550B haptics device, and adds the experimental native-sleep marker and gamepad properties. It also corrects the shared PCIe WAKE# GPIO from active-high to active-low. That polarity fix is an unconditional board-DT correction inherited by the AYN and Retroid products using this common tree; it is not controlled by `sm8550.ns`, although it only affects PCIe wake handling during real system suspend. #SM8550_SLEEP
 - `dts/qcs8550-retroidpocket-rp6.dts.patch`
   source: armada
   notes: Armada switches Pocket 6 from ROCKNIX's Odin 2 fallback to audio firmware extracted from a Pocket 6 vendor image.
 - `dts/qcs8550-ayn-thor.dts.patch`
   source: armada
-  notes: Armada fixes the hall-sensor pinctrl and touch orientation after copying `dts/qcs8550-ayn-thor.dts`.
+  notes: Armada fixes the hall-sensor pinctrl and touch orientation after copying `dts/qcs8550-ayn-thor.dts`, and opts the lower FT5452 touchscreen into retained power during system suspend. #SM8550_SLEEP
 - `dts/sm8650-ayaneo-common.dtsi.patch`
   source: armada
   notes: Armada applies this local patch after copying `dts/sm8650-ayaneo-common.dtsi`.

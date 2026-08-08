@@ -1,0 +1,40 @@
+From: jaewun <jaewun@users.noreply.github.com>
+Subject: [PATCH] input: rsinput: suspend the gamepad MCU across system sleep
+
+The gamepad MCU streams input reports continuously over the UART. Across a
+system-suspend teardown the MCU keeps sending, so the geni-serial RX interrupt
+storms while the port is stopping, the primary handler returns IRQ_NONE, and the
+kernel's spurious-IRQ detector permanently disables the UART IRQ -- the gamepad
+is then dead after resume until the IRQ is re-requested.
+
+Extend the existing generic RSInput suspend callback to quiesce the MCU by
+dropping its enable rail and asserting reset, mirroring rsinput_remove(). The
+generic resume callback re-powers and re-initialises it.
+
+Signed-off-by: jaewun <jaewun@users.noreply.github.com>
+---
+--- a/drivers/input/joystick/rsinput.c
++++ b/drivers/input/joystick/rsinput.c
+@@ -643,6 +643,22 @@ static int rsinput_suspend(struct device *dev)
+     if (drv->rumble_work.func)
+         cancel_work_sync(&drv->rumble_work);
+ 
++    /*
++     * The MCU streams gamepad reports continuously over the UART. If it keeps
++     * sending across the system-suspend teardown, the geni-serial RX interrupt
++     * storms while the port is being stopped, the primary handler returns
++     * IRQ_NONE, and the kernel's spurious-IRQ detector permanently disables the
++     * UART IRQ -- leaving the gamepad dead after resume until the IRQ is
++     * re-requested. Quiesce the MCU (drop its enable rail and hold it in reset,
++     * mirroring rsinput_remove) so the line goes silent before the UART
++     * suspends; rsinput_resume() re-powers and re-initialises it.
++     */
++    if (drv->enable_gpio)
++        gpiod_set_value_cansleep(drv->enable_gpio, 0);
++
++    if (drv->reset_gpio)
++        gpiod_set_value_cansleep(drv->reset_gpio, 0);
++
+     return 0;
+ }
+ 

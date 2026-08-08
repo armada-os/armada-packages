@@ -1,0 +1,86 @@
+From: gh123man <gh123man@users.noreply.github.com>
+Subject: [PATCH] scsi: ufs: hold clock gating across SM8550 system PM
+
+Hardware diagnostics captured a software clock-gating worker entering
+DME_HIBER_ENTER while system suspend was beginning. The UIC command then
+timed out while the PM path waited for the worker, leaving the link unusable
+and a later suspend stuck in filesystem sync.
+
+Serialize these paths at the existing system-PM prepare/complete boundary.
+Take a clock-gating hold after runtime resume while normal completion
+handling is available, retain it across suspend and resume callbacks, and
+release it from ufshcd_resume_complete(). Restrict the workaround to the
+SM8550 UFS host because Armada uses one kernel across multiple SoCs.
+
+Signed-off-by: gh123man <gh123man@users.noreply.github.com>
+---
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -11439,6 +11439,11 @@ void ufshcd_resume_complete(struct device *dev)
+ {
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
+ 
++	if (of_device_is_compatible(hba->dev->of_node, "qcom,sm8550-ufshc") &&
++	    hba->complete_clkgate_hold) {
++		hba->complete_clkgate_hold = false;
++		ufshcd_release(hba);
++	}
+ 	if (hba->complete_put) {
+ 		ufshcd_rpm_put(hba);
+ 		hba->complete_put = false;
+@@ -11470,5 +11475,6 @@ int __ufshcd_suspend_prepare(struct device *dev, bool rpm_ok_for_spm)
+ {
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
++	bool rpm_ready_for_spm;
+ 	int ret;
+ 
+ 	/*
+@@ -11480,17 +11486,28 @@ int __ufshcd_suspend_prepare(struct device *dev, bool rpm_ok_for_spm)
+ 	if (hba->ufs_device_wlun) {
+ 		/* Prevent runtime suspend */
+ 		ufshcd_rpm_get_noresume(hba);
++		rpm_ready_for_spm = rpm_ok_for_spm && ufshcd_rpm_ok_for_spm(hba);
+ 		/*
+ 		 * Check if already runtime suspended in same state as system
+ 		 * suspend would be.
+ 		 */
+-		if (!rpm_ok_for_spm || !ufshcd_rpm_ok_for_spm(hba)) {
++		if (!rpm_ready_for_spm) {
+ 			/* RPM state is not ok for SPM, so runtime resume */
+ 			ret = ufshcd_rpm_resume(hba);
+ 			if (ret < 0 && ret != -EACCES) {
+ 				ufshcd_rpm_put(hba);
+ 				return ret;
+ 			}
++
++			/*
++			 * Serialize system PM against the asynchronous clock-gating
++			 * worker while normal IRQ completion is still available.
++			 */
++			if (of_device_is_compatible(hba->dev->of_node,
++						    "qcom,sm8550-ufshc")) {
++				ufshcd_hold(hba);
++				hba->complete_clkgate_hold = true;
++			}
+ 		}
+ 		hba->complete_put = true;
+ 	}
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -929,6 +929,8 @@ struct ufs_hba {
+  * @nr_queues: number of Queues of different queue types
+  * @complete_put: whether or not to call ufshcd_rpm_put() from inside
+  *	ufshcd_resume_complete()
++ * @complete_clkgate_hold: whether ufshcd_resume_complete() must release
++ *	clock-gating hold acquired by ufshcd_suspend_prepare()
+  * @mcq_sup: is mcq supported by UFSHC
+  * @mcq_enabled: is mcq ready to accept requests
+  * @mcq_esi_enabled: is mcq ESI configured
+@@ -1110,6 +1112,7 @@ struct ufs_hba {
+ 	unsigned int nr_hw_queues;
+ 	unsigned int nr_queues[HCTX_MAX_TYPES];
+ 	bool complete_put;
++	bool complete_clkgate_hold;
+ 	bool scsi_host_added;
+ 	bool mcq_sup;
+ 	bool lsdb_sup;
