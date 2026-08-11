@@ -28,8 +28,9 @@ diff -rupbN linux.orig/drivers/power/supply/Kconfig linux/drivers/power/supply/K
 diff -rupbN linux.orig/drivers/power/supply/Makefile linux/drivers/power/supply/Makefile
 --- linux.orig/drivers/power/supply/Makefile	2025-09-29 12:48:19.609606572 +0000
 +++ linux/drivers/power/supply/Makefile	2025-09-29 12:58:22.118192478 +0000
-@@ -128,6 +128,8 @@ obj-$(CONFIG_BATTERY_SURFACE)	+= surface
+@@ -128,7 +128,9 @@ obj-$(CONFIG_BATTERY_SURFACE)	+= surface_battery.o
  obj-$(CONFIG_CHARGER_SURFACE)	+= surface_charger.o
+ obj-$(CONFIG_BATTERY_CHARGER_SURFACE_RT) += surface-rt-ec.o
  obj-$(CONFIG_BATTERY_UG3105)	+= ug3105_battery.o
  obj-$(CONFIG_CHARGER_QCOM_SMB2)	+= qcom_smbx.o
 +obj-$(CONFIG_CHARGER_QCOM_SMB5)	+= qcom_pm8150b_charger.o

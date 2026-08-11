@@ -48,11 +48,17 @@ if command -v ccache >/dev/null 2>&1; then
 fi
 
 # ---------- 1. Fetch upstream source ----------
-SRC_TARBALL="linux-${KERNEL_VERSION}.tar.xz"
-# Some build environments cannot fetch from cdn.kernel.org; gregkh/linux mirrors
-# the stable tags and provides a fallback source.
-SRC_URL="${KERNEL_SRC_URL:-https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_MAJOR}.x/${SRC_TARBALL}}"
-SRC_URL_FALLBACK="https://github.com/gregkh/linux/archive/refs/tags/v${KERNEL_VERSION}.tar.gz"
+if [[ "${KERNEL_VERSION}" == *-rc* ]]; then
+    SRC_TARBALL="linux-${KERNEL_VERSION}.tar.gz"
+    SRC_URL="${KERNEL_SRC_URL:-https://git.kernel.org/torvalds/t/${SRC_TARBALL}}"
+    SRC_URL_FALLBACK="https://github.com/torvalds/linux/archive/refs/tags/v${KERNEL_VERSION}.tar.gz"
+else
+    SRC_TARBALL="linux-${KERNEL_VERSION}.tar.xz"
+    # Some build environments cannot fetch from cdn.kernel.org; gregkh/linux
+    # mirrors the stable tags and provides a fallback source.
+    SRC_URL="${KERNEL_SRC_URL:-https://cdn.kernel.org/pub/linux/kernel/v${KERNEL_MAJOR}.x/${SRC_TARBALL}}"
+    SRC_URL_FALLBACK="https://github.com/gregkh/linux/archive/refs/tags/v${KERNEL_VERSION}.tar.gz"
+fi
 
 cd "${WORK_DIR}"
 if [ ! -f "${SRC_TARBALL}" ]; then

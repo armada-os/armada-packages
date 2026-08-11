@@ -107,9 +107,9 @@ diff --git a/drivers/crypto/qce/core.c b/drivers/crypto/qce/core.c
 index ac74f69914d6..b6edca5f1663 100644
 --- a/drivers/crypto/qce/core.c
 +++ b/drivers/crypto/qce/core.c
-@@ -12,6 +12,8 @@
+@@ -11,6 +11,8 @@
+ #include <linux/interrupt.h>
  #include <linux/module.h>
- #include <linux/mod_devicetable.h>
  #include <linux/platform_device.h>
 +#include <linux/pm.h>
 +#include <linux/pm_runtime.h>

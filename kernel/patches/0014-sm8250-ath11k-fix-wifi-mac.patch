@@ -8,7 +8,7 @@ already supplied by 0501-ROCKNIX-fix-wifi-and-bt-mac.patch.
 diff -rupbN linux.orig/drivers/net/wireless/ath/ath11k/mac.c linux/drivers/net/wireless/ath/ath11k/mac.c
 --- linux.orig/drivers/net/wireless/ath/ath11k/mac.c	2025-09-29 12:48:19.413605908 +0000
 +++ linux/drivers/net/wireless/ath/ath11k/mac.c	2025-09-29 13:05:05.964239071 +0000
-@@ -165,6 +165,91 @@ static const struct ieee80211_channel at
+@@ -165,6 +165,92 @@ static const struct ieee80211_channel at
  	CHAN6G(2, 5935, 0),
  };
  
@@ -53,7 +53,8 @@ diff -rupbN linux.orig/drivers/net/wireless/ath/ath11k/mac.c linux/drivers/net/w
 +	}
 +
 +	// Extract the last 6 characters
-+	strncpy(last6, serial + serial_len - 6, 6);
++	for (i = 0; i < 6; i++)
++		last6[i] = serial[serial_len - 6 + i];
 +
 +	// Initialize the first 3 bytes
 +	macaddr->b[5] = 0x00;
@@ -100,7 +101,7 @@ diff -rupbN linux.orig/drivers/net/wireless/ath/ath11k/mac.c linux/drivers/net/w
  static struct ieee80211_rate ath11k_legacy_rates[] = {
  	{ .bitrate = 10,
  	  .hw_value = ATH11K_HW_RATE_CCK_LP_1M },
-@@ -10515,6 +10600,7 @@ int ath11k_mac_register(struct ath11k_ba
+@@ -10515,6 +10601,7 @@ int ath11k_mac_register(struct ath11k_ba
  	int i;
  	int ret;
  	u8 mac_addr[ETH_ALEN] = {};
@@ -108,7 +109,7 @@ diff -rupbN linux.orig/drivers/net/wireless/ath/ath11k/mac.c linux/drivers/net/w
  
  	if (test_bit(ATH11K_FLAG_REGISTERED, &ab->dev_flags))
  		return 0;
-@@ -10532,6 +10618,10 @@ int ath11k_mac_register(struct ath11k_ba
+@@ -10532,6 +10619,10 @@ int ath11k_mac_register(struct ath11k_ba
  	for (i = 0; i < ab->num_radios; i++) {
  		pdev = &ab->pdevs[i];
  		ar = pdev->ar;
@@ -119,7 +120,7 @@ diff -rupbN linux.orig/drivers/net/wireless/ath/ath11k/mac.c linux/drivers/net/w
  		if (ab->pdevs_macaddr_valid) {
  			ether_addr_copy(ar->mac_addr, pdev->mac_addr);
  		} else {
-@@ -10539,7 +10629,12 @@ int ath11k_mac_register(struct ath11k_ba
+@@ -10539,7 +10630,12 @@ int ath11k_mac_register(struct ath11k_ba
  				ether_addr_copy(ar->mac_addr, ab->mac_addr);
  			else
  				ether_addr_copy(ar->mac_addr, mac_addr);

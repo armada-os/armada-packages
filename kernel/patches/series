@@ -45,13 +45,15 @@
 0058-input-joystick-add-ayaneo-mcu-joystick.patch
 0069-input-misc-add-konkr-sysbtn-MCU-system-buttons.patch
 0031_input--Add-driver-for-RSInput-Gamepad.patch
-0006-hid-playstation-expose-DualSense-Edge-Fn-and-back-paddles.patch
-0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch
 0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch
 0506-usbcore-add-interrupt-interval-override.patch
 
 # ============== USB boot hang fix ==============
 0071-HACK-fix-usb-boot-hang.patch
+
+# ============== USB-C / UCSI ==============
+0519-usb-typec-ucsi-clear-USB-role.patch
+0520-usb-typec-ucsi-quiesce-sm8550-role-on-suspend.patch #SM8550_SLEEP
 
 # ============== Haptics ==============
 1000-input-misc-qcom-hv-haptics-sm8750.patch
@@ -59,6 +61,7 @@
 1001-haptics-driver-support-periodic-sine-and-fixes.patch
 1002-input-rsinput-sm8750-ff.patch
 1003-input-haptics-fix-rumble-bridge-atomic-sleep.patch
+1004-input-rsinput-suspend-resume-gamepad-mcu.patch #SM8550_SLEEP
 1004-input-haptics-stop-zero-amplitude-immediately.patch
 1300-input-rsinput-axis-deadzone.patch
 
@@ -81,11 +84,30 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0504-wakeup-qcom-ipcc-remove-IRQF-NO-SUSPEND.patch
 0505-msm_gem-lock-before-put_iova_spaces.patch
 
+# ============== SM8550_SLEEP patch set ==============
+0203-thermal-qcom-tsens-skip-sm8550-uplow-wake-irq.patch #SM8550_SLEEP
+0207-scsi-ufs-qcom-balance-irq-on-host-reset-error.patch #SM8550_SLEEP
+1006-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch #SM8550_SLEEP
+1007-scsi-ufs-qcom-propagate-hibern8-exit-failure-clk-scale.patch #SM8550_SLEEP
+1008-scsi-ufs-qcom-auto-hibern8-clk-gating-collision.patch #SM8550_SLEEP
+1010-scsi-ufs-qcom-keep-mphy-powered-on-hibern8-park.patch #SM8550_SLEEP
+1011-scsi-ufs-hold-clk-gating-across-system-pm.patch #SM8550_SLEEP
+1012-input-edt-ft5x06-retain-power-in-suspend.patch #SM8550_SLEEP
+1013-soc-qcom-ice-unwind-core-clk-on-iface-clk-fail.patch #SM8550_SLEEP
+1015-ufs-qcom-disable-rx-linecfg-after-link-startup.patch #SM8550_SLEEP
+1023-pci-qcom-skip-l23-ready-after-pme-sm8550.patch #SM8550_SLEEP
+1026-pci-qcom-use-suspend-opp-for-non-s2ram.patch #SM8550_SLEEP
+1027-arm64-dts-qcom-sm8550-mark-pcie-suspend-opp.patch #SM8550_SLEEP
+1028-armada-scope-sm8550-suspend-workarounds.patch #SM8550_SLEEP
+1029-armada-gate-sm8550-native-sleep-workarounds.patch #SM8550_SLEEP
+1009-scsi-ufs-recover-hibern8-enter-clk-gating.patch #SM8550_SLEEP
+
+1031-revert-clk-regmap-phy-mux-rate-based-rework.patch
+
 # ============== SM8550 DTSI prerequisites ==============
 0001-pcie-update-sm8550-dtsi.patch
-0101-v3_20260219_webgeek1234_arm64_qcom_sm8550_add_ddr_llcc_l3_cpu_bandwidth_scaling.patch
 0120-20250728_konradybcio_gpu_cc_power_requirements_reality_check.patch
-0121-pmdomain-qcom-rpmhpd-no-max-clamp-on-gmu-rails.patch
+0121-pmdomain-qcom-rpmhpd-presync-floor-gmu-rails.patch
 0122-interconnect__qcom__sm8550__Enable_QoS_configuration.patch
 0200-ASoC-wcd938x-add-DMIC-DAPM-inputs.patch
 
@@ -135,7 +157,6 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0037-arm64-dts-qcom-sm8750-add-CPU-thermal-cooling.patch
 0049-drm-msm-a8xx-add-adreno-830-catalog.patch
 0050-clk-qcom-gxclkctl-kaanapali-fix-gx-gdsc-collapse.patch
-0051-drm-msm-a6xx-limit-gxpd-votes-to-recovery-in-a8x.patch
 0039-wifi-ath12k-add-initial-hardware-definition-for-WCN7.patch
 0040-wifi-ath12k-send-QDSS-config-when-CNSS_QDSS_CFG_MISS.patch
 0041-wifi-ath12k-disable-CNSS_QDSS_CFG_MISS_V01-for-the-W.patch
@@ -146,7 +167,6 @@ v2_20260420_neil_armstrong_arm64_qcom_sm8650_misc_enhancements.patch
 0066-scsi-ufs-ufs-qcom-add-sm8750-compatible.patch
 0509-soc-qcom-pmic_glink_altmode-defer-until-mux-switch-ready.patch
 0517-usb-typec-mux-dont-swallow-EPROBE_DEFER.patch
-0519-usb-typec-ucsi-clear-USB-role.patch
 0603-ASoC-codecs-wcd939x-keep-the-codec-resumed-while-a-ja.patch
 0060-ASoC-qcom-sc8280xp-enable-MI2S-bit-clock-on-BE-startup.patch
 0072-ASoC-lpass-rx-macro-add-HPH-PCM-mode.patch

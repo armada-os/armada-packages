@@ -1,81 +1,14 @@
 From: KONKR Pocket FIT Elite port
 Subject: [PATCH] arm64: dts: qcom: sm8750: add CPU thermal cooling
 
-The per-core thermal zones only had a 120C hot and 125C critical trip,
-so nothing ever throttled the CPU: the SoC runs at the top OPP until it
-hits the critical shutdown temperature. Add the standard cpufreq
-cooling wiring, mirroring sm8250: two passive trips (90C/95C) on each
-of the 16 per-core zones with cooling maps over the cluster's cores,
-polling-delay-passive of 250ms, and #cooling-cells on the CPU nodes.
-scmi-cpufreq carries CPUFREQ_IS_COOLING_DEV, so the cooling devices
-register automatically once the CPU nodes advertise #cooling-cells.
+The per-core thermal zones only have a 120C hot and 125C critical trip,
+so nothing throttles the CPU before critical shutdown. Add two passive
+trips (90C/95C) on each of the 16 per-core zones, cooling maps over each
+cluster's CPUs, and a 250 ms passive polling delay. Linux 7.2 already
+provides the CPU #cooling-cells properties.
 ---
 --- a/arch/arm64/boot/dts/qcom/sm8750.dtsi
 +++ b/arch/arm64/boot/dts/qcom/sm8750.dtsi
-@@ -44,6 +44,7 @@
- 			next-level-cache = <&l2_0>;
- 			power-domains = <&cpu_pd0>, <&scmi_dvfs 0>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 
- 			l2_0: l2-cache {
- 				compatible = "cache";
-@@ -60,6 +61,7 @@
- 			next-level-cache = <&l2_0>;
- 			power-domains = <&cpu_pd1>, <&scmi_dvfs 0>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 		};
- 
- 		cpu2: cpu@200 {
-@@ -70,6 +72,7 @@
- 			next-level-cache = <&l2_0>;
- 			power-domains = <&cpu_pd2>, <&scmi_dvfs 0>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 		};
- 
- 		cpu3: cpu@300 {
-@@ -80,6 +83,7 @@
- 			next-level-cache = <&l2_0>;
- 			power-domains = <&cpu_pd3>, <&scmi_dvfs 0>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 		};
- 
- 		cpu4: cpu@400 {
-@@ -90,6 +94,7 @@
- 			next-level-cache = <&l2_0>;
- 			power-domains = <&cpu_pd4>, <&scmi_dvfs 0>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 		};
- 
- 		cpu5: cpu@500 {
-@@ -100,6 +105,7 @@
- 			next-level-cache = <&l2_0>;
- 			power-domains = <&cpu_pd5>, <&scmi_dvfs 0>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 		};
- 
- 		cpu6: cpu@10000 {
-@@ -110,6 +116,7 @@
- 			next-level-cache = <&l2_1>;
- 			power-domains = <&cpu_pd6>, <&scmi_dvfs 1>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 
- 			l2_1: l2-cache {
- 				compatible = "cache";
-@@ -126,6 +133,7 @@
- 			next-level-cache = <&l2_1>;
- 			power-domains = <&cpu_pd7>, <&scmi_dvfs 1>;
- 			power-domain-names = "psci", "perf";
-+			#cooling-cells = <2>;
- 		};
- 
- 		cpu-map {
 @@ -6242,10 +6250,46 @@
  		};
  

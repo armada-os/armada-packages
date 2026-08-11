@@ -1,210 +1,207 @@
-From e05ed5ba9b2d6d6dd579f318768aa9aeb0441141 Mon Sep 17 00:00:00 2001
-From: Philippe Simons <simons.philippe@gmail.com>
-Date: Sat, 5 Jul 2025 23:02:03 +0200
-Subject: [PATCH] regulator: add sgm3804 i2c regulator for panel power
- management.
+From: virtudude <virtudude@protonmail.com>
+Date: Mon, 10 Aug 2026 00:00:00 +0000
+Subject: [PATCH] regulator: sgm3804: support legacy flat panel supply
+
+Linux 7.2 provides an SGM3804 driver using separate pos and neg child
+regulators. Armada's existing board descriptions expose one fixed 5 V
+regulator with reset-gpios on the parent node.
+
+Keep the upstream interface unchanged when a pos child exists. Otherwise,
+support the legacy flat binding and preserve its paired-rail power
+sequence.
 
 ---
- drivers/regulator/Kconfig             |   6 +
- drivers/regulator/Makefile            |   1 +
- drivers/regulator/sgm3804-regulator.c | 175 ++++++++++++++++++++++++++
- 3 files changed, 182 insertions(+)
- create mode 100644 drivers/regulator/sgm3804-regulator.c
+ drivers/regulator/sgm3804-regulator.c | 144 ++++++++++++++++++++++++++
+ 1 file changed, 144 insertions(+)
 
-diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
-index 05e32d764028..631a0ad98724 100644
---- a/drivers/regulator/Kconfig
-+++ b/drivers/regulator/Kconfig
-@@ -1353,6 +1353,12 @@ config REGULATOR_SC2731
- 	  This driver provides support for the voltage regulators on the
- 	  SC2731 PMIC.
- 
-+config REGULATOR_SGM3804
-+	tristate "SGMicro sgm3804 voltage regulator"
-+	depends on I2C && OF
-+	help
-+	  This driver supports SGMicro sgm3804 voltage regulator.
-+
- config REGULATOR_SKY81452
- 	tristate "Skyworks Solutions SKY81452 voltage regulator"
- 	depends on MFD_SKY81452
-diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
-index 524e026c0273..8b6925a159a3 100644
---- a/drivers/regulator/Makefile
-+++ b/drivers/regulator/Makefile
-@@ -172,6 +172,7 @@ obj-$(CONFIG_REGULATOR_S2MPA01) += s2mpa01.o
- obj-$(CONFIG_REGULATOR_S2MPS11) += s2mps11.o
- obj-$(CONFIG_REGULATOR_S5M8767) += s5m8767.o
- obj-$(CONFIG_REGULATOR_SC2731) += sc2731-regulator.o
-+obj-$(CONFIG_REGULATOR_SGM3804) += sgm3804-regulator.o
- obj-$(CONFIG_REGULATOR_SKY81452) += sky81452-regulator.o
- obj-$(CONFIG_REGULATOR_SLG51000) += slg51000-regulator.o
- obj-$(CONFIG_REGULATOR_SPACEMIT_P1) += spacemit-p1.o
-diff --git a/drivers/regulator/sgm3804-regulator.c b/drivers/regulator/sgm3804-regulator.c
-new file mode 100644
-index 0000000..5e7eac930
---- /dev/null
+--- a/drivers/regulator/sgm3804-regulator.c
 +++ b/drivers/regulator/sgm3804-regulator.c
-@@ -0,0 +1,162 @@
-+// SPDX-License-Identifier: GPL-2.0
-+/*
-+ * SGMicro SGM3804 panel-bias regulator (fixed +5 V boost over I2C).
-+ */
-+
-+#include <linux/err.h>
-+#include <linux/i2c.h>
-+#include <linux/module.h>
-+#include <linux/regmap.h>
-+#include <linux/regulator/driver.h>
-+#include <linux/regulator/of_regulator.h>
-+#include <linux/gpio/consumer.h>
-+
-+#define SGM3804_FIXED_UV	5000000		/* fixed 5 V panel-bias output */
-+
-+struct sgm3804_data {
-+	struct regmap *regmap;
-+	struct gpio_desc *reset_gpio[2];
-+	bool enabled;
-+};
-+
-+static const struct regmap_config sgm3804_regmap_config = {
+@@ -27,6 +27,7 @@
+ #define RAIL_DISCHARGE_REG_DEFAULT	(POS_RAIL_DISCHARGE_EN | NEG_RAIL_DISCHARGE_EN)
+ 
+ #define SGM3804_VOLTAGES_MAX_SELECTOR	0x2f
++#define SGM3804_LEGACY_FIXED_UV		5000000
+ 
+ enum {
+ 	SGM3804_POS_RAIL = 0,
+@@ -44,6 +45,7 @@
+ 	/* Protects the regcache state update */
+ 	struct mutex lock;
+ 	struct gpio_desc *gpios[SGM3804_RAIL_COUNT];
++	bool legacy_enabled;
+ };
+ 
+ static const struct linear_range sgm3804_voltages[] = {
+@@ -95,6 +97,12 @@
+ 	.num_reg_defaults = ARRAY_SIZE(sgm3804_reg_defaults),
+ };
+ 
++static const struct regmap_config sgm3804_legacy_regmap_config = {
 +	.reg_bits = 8,
 +	.val_bits = 8,
-+	.max_register = 0x03,
++	.max_register = SGM3804_RAIL_DISCHARGE_REG,
 +};
 +
-+static int sgm3804_enable(struct regulator_dev *rdev)
+ static int sgm3804_sync_regcache_state(struct sgm3804_data *ctx)
+ {
+ 	guard(mutex)(&ctx->lock);
+@@ -225,10 +233,137 @@
+ 	},
+ };
+ 
++static int sgm3804_legacy_enable(struct regulator_dev *rdev)
 +{
-+	struct sgm3804_data *data = rdev_get_drvdata(rdev);
-+	struct regmap *regmap = data->regmap;
-+	int ret = 0;
++	struct sgm3804_data *ctx = rdev_get_drvdata(rdev);
++	int ret;
 +
-+	/* drive the reset/enable line(s) high to bring the chip up */
-+	if (data->reset_gpio[0])
-+		gpiod_set_value_cansleep(data->reset_gpio[0], 1);
-+	if (data->reset_gpio[1])
-+		gpiod_set_value_cansleep(data->reset_gpio[1], 1);
-+
-+	/* vendor power-on sequence: program both rails and enable the output */
-+	ret |= regmap_write(regmap, 0x00, 0x0c);
-+	ret |= regmap_write(regmap, 0x01, 0x0c);
-+	ret |= regmap_write(regmap, 0x03, 0x03);
-+	if (ret) {
-+		dev_err(rdev->dev.parent, "failed to enable SGM3804 regulator\n");
++	ret = gpiod_set_value_cansleep(ctx->gpios[SGM3804_POS_RAIL], 1);
++	if (ret)
 +		return ret;
++
++	if (ctx->gpios[SGM3804_NEG_RAIL]) {
++		ret = gpiod_set_value_cansleep(ctx->gpios[SGM3804_NEG_RAIL], 1);
++		if (ret)
++			goto disable_pos;
 +	}
 +
-+	data->enabled = true;
++	ret = regmap_write(ctx->regmap, SGM3804_POS_RAIL_VOLTAGE_REG, 0x0c);
++	if (ret)
++		goto disable_rails;
++
++	ret = regmap_write(ctx->regmap, SGM3804_NEG_RAIL_VOLTAGE_REG, 0x0c);
++	if (ret)
++		goto disable_rails;
++
++	ret = regmap_write(ctx->regmap, SGM3804_RAIL_DISCHARGE_REG,
++			   RAIL_DISCHARGE_REG_DEFAULT);
++	if (ret)
++		goto disable_rails;
++
++	ctx->legacy_enabled = true;
++	return 0;
++
++disable_rails:
++	if (ctx->gpios[SGM3804_NEG_RAIL])
++		gpiod_set_value_cansleep(ctx->gpios[SGM3804_NEG_RAIL], 0);
++disable_pos:
++	gpiod_set_value_cansleep(ctx->gpios[SGM3804_POS_RAIL], 0);
++	return ret;
++}
++
++static int sgm3804_legacy_disable(struct regulator_dev *rdev)
++{
++	struct sgm3804_data *ctx = rdev_get_drvdata(rdev);
++	int ret;
++
++	if (ctx->gpios[SGM3804_NEG_RAIL]) {
++		ret = gpiod_set_value_cansleep(ctx->gpios[SGM3804_NEG_RAIL], 0);
++		if (ret)
++			return ret;
++	}
++
++	ret = gpiod_set_value_cansleep(ctx->gpios[SGM3804_POS_RAIL], 0);
++	if (ret)
++		return ret;
++
++	ctx->legacy_enabled = false;
 +	return 0;
 +}
 +
-+static int sgm3804_disable(struct regulator_dev *rdev)
++static int sgm3804_legacy_is_enabled(struct regulator_dev *rdev)
 +{
-+	struct sgm3804_data *data = rdev_get_drvdata(rdev);
++	struct sgm3804_data *ctx = rdev_get_drvdata(rdev);
 +
-+	if (data->reset_gpio[0])
-+		gpiod_set_value_cansleep(data->reset_gpio[0], 0);
-+	if (data->reset_gpio[1])
-+		gpiod_set_value_cansleep(data->reset_gpio[1], 0);
-+
-+	data->enabled = false;
-+	return 0;
++	return ctx->legacy_enabled;
 +}
 +
-+static int sgm3804_is_enabled(struct regulator_dev *rdev)
++static int sgm3804_legacy_get_voltage(struct regulator_dev *rdev)
 +{
-+	struct sgm3804_data *data = rdev_get_drvdata(rdev);
-+
-+	return data->enabled;
++	return SGM3804_LEGACY_FIXED_UV;
 +}
 +
-+static int sgm3804_get_voltage(struct regulator_dev *rdev)
-+{
-+	return SGM3804_FIXED_UV;
-+}
-+
-+static const struct regulator_ops sgm3804_ops = {
-+	.enable = sgm3804_enable,
-+	.disable = sgm3804_disable,
-+	.is_enabled = sgm3804_is_enabled,
-+	.get_voltage = sgm3804_get_voltage,
++static const struct regulator_ops sgm3804_legacy_ops = {
++	.enable = sgm3804_legacy_enable,
++	.disable = sgm3804_legacy_disable,
++	.is_enabled = sgm3804_legacy_is_enabled,
++	.get_voltage = sgm3804_legacy_get_voltage,
 +};
 +
-+static const struct regulator_desc sgm3804_reg = {
++static const struct regulator_desc sgm3804_legacy_regulator_desc = {
 +	.name = "SGM3804",
-+	.id = 0,
-+	.ops = &sgm3804_ops,
++	.ops = &sgm3804_legacy_ops,
 +	.type = REGULATOR_VOLTAGE,
 +	.n_voltages = 1,
-+	.min_uV = SGM3804_FIXED_UV,
++	.min_uV = SGM3804_LEGACY_FIXED_UV,
 +	.owner = THIS_MODULE,
 +};
 +
-+static int sgm3804_i2c_probe(struct i2c_client *i2c)
++static int sgm3804_legacy_probe(struct i2c_client *i2c,
++				struct sgm3804_data *ctx)
 +{
 +	struct device *dev = &i2c->dev;
 +	struct regulator_config config = { };
 +	struct regulator_dev *rdev;
-+	struct sgm3804_data *data;
 +
-+	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
-+	if (!data)
-+		return -ENOMEM;
-+
-+	data->regmap = devm_regmap_init_i2c(i2c, &sgm3804_regmap_config);
-+	if (IS_ERR(data->regmap))
-+		return dev_err_probe(dev, PTR_ERR(data->regmap), "failed to init regmap\n");
-+
-+	/* first reset GPIO is required; the second is optional */
-+	data->reset_gpio[0] = devm_gpiod_get_index(dev, "reset", 0, GPIOD_OUT_HIGH);
-+	if (IS_ERR(data->reset_gpio[0]))
-+		return dev_err_probe(dev, PTR_ERR(data->reset_gpio[0]),
++	ctx->gpios[SGM3804_POS_RAIL] =
++		devm_gpiod_get_index(dev, "reset", SGM3804_POS_RAIL,
++				     GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->gpios[SGM3804_POS_RAIL]))
++		return dev_err_probe(dev, PTR_ERR(ctx->gpios[SGM3804_POS_RAIL]),
 +				     "failed to get first reset GPIO\n");
 +
-+	data->reset_gpio[1] = devm_gpiod_get_index_optional(dev, "reset", 1, GPIOD_OUT_HIGH);
-+	if (IS_ERR(data->reset_gpio[1]))
-+		return dev_err_probe(dev, PTR_ERR(data->reset_gpio[1]),
++	ctx->gpios[SGM3804_NEG_RAIL] =
++		devm_gpiod_get_index_optional(dev, "reset", SGM3804_NEG_RAIL,
++					      GPIOD_OUT_HIGH);
++	if (IS_ERR(ctx->gpios[SGM3804_NEG_RAIL]))
++		return dev_err_probe(dev, PTR_ERR(ctx->gpios[SGM3804_NEG_RAIL]),
 +				     "failed to get second reset GPIO\n");
 +
 +	config.dev = dev;
-+	config.regmap = data->regmap;
-+	config.driver_data = data;
-+	config.of_node = dev->of_node;
-+	config.init_data = of_get_regulator_init_data(dev, dev->of_node, &sgm3804_reg);
++	config.regmap = ctx->regmap;
++	config.driver_data = ctx;
++	config.of_node = dev_of_node(dev);
++	config.init_data = of_get_regulator_init_data(dev, dev_of_node(dev),
++						      &sgm3804_legacy_regulator_desc);
 +	if (!config.init_data)
 +		return -ENOMEM;
 +
-+	rdev = devm_regulator_register(dev, &sgm3804_reg, &config);
++	rdev = devm_regulator_register(dev, &sgm3804_legacy_regulator_desc,
++				       &config);
 +	if (IS_ERR(rdev))
-+		return dev_err_probe(dev, PTR_ERR(rdev), "failed to register SGM3804 regulator\n");
++		return dev_err_probe(dev, PTR_ERR(rdev),
++				     "failed to register legacy regulator\n");
 +
 +	return 0;
 +}
 +
-+static const struct i2c_device_id sgm3804_i2c_id[] = {
-+	{ "sgm3804" },
-+	{ }
-+};
-+MODULE_DEVICE_TABLE(i2c, sgm3804_i2c_id);
+ static int sgm3804_probe(struct i2c_client *i2c)
+ {
+ 	struct device *dev = &i2c->dev;
++	struct fwnode_handle *pos;
+ 	struct sgm3804_data *ctx;
++	bool legacy;
+ 	int ret, i;
+ 
+ 	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
+@@ -237,11 +372,20 @@
+ 
+ 	mutex_init(&ctx->lock);
+ 
+-	ctx->regmap = devm_regmap_init_i2c(i2c, &sgm3804_regmap_config);
++	pos = device_get_named_child_node(dev, "pos");
++	legacy = !pos;
++	fwnode_handle_put(pos);
 +
-+static const struct of_device_id sgm3804_i2c_of_match[] = {
-+	{ .compatible = "sgmicro,sgm3804" },
-+	{ }
-+};
-+MODULE_DEVICE_TABLE(of, sgm3804_i2c_of_match);
++	ctx->regmap = devm_regmap_init_i2c(i2c, legacy ?
++					   &sgm3804_legacy_regmap_config :
++					   &sgm3804_regmap_config);
+ 	if (IS_ERR(ctx->regmap))
+ 		return dev_err_probe(dev, PTR_ERR(ctx->regmap),
+ 				     "failed to init regmap\n");
+ 
++	if (legacy)
++		return sgm3804_legacy_probe(i2c, ctx);
 +
-+static struct i2c_driver sgm3804_regulator_driver = {
-+	.driver = {
-+		.name = "sgm3804",
-+		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
-+		.of_match_table = sgm3804_i2c_of_match,
-+	},
-+	.probe = sgm3804_i2c_probe,
-+	.id_table = sgm3804_i2c_id,
-+};
-+
-+module_i2c_driver(sgm3804_regulator_driver);
-+
-+MODULE_DESCRIPTION("SGMicro SGM3804 regulator driver");
-+MODULE_AUTHOR("Kancy Joe <kancy2333@outlook.com>");
-+MODULE_LICENSE("GPL");
+ 	/* Get enable GPIOs */
+ 	for (i = 0; i < ARRAY_SIZE(sgm3804_regulator_desc); i++) {
+ 		const struct regulator_desc *reg = &sgm3804_regulator_desc[i];

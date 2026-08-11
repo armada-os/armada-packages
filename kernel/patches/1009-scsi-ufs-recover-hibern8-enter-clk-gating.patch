@@ -1,0 +1,97 @@
+From: gh123man <gh123man@users.noreply.github.com>
+Subject: [PATCH] scsi: ufs: recover clock-gating hibern8-enter failures inline
+
+ufshcd_gate_work() restores the software clock-gating state when
+DME_HIBER_ENTER fails but does not repair the link. Recover inline for the
+opted-in SM8550 path and disable runtime clock gating after the first failure.
+
+Linux 7.2 uses a plain hard IRQ handler, so the former relink completion
+poller is no longer needed. Keep a dedicated flag while inline recovery owns
+UIC errors so the generic error handler cannot race a second reset.
+---
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -2030,6 +2030,7 @@
+ {
+ 	struct ufs_hba *hba = container_of(work, struct ufs_hba,
+ 			clk_gating.gate_work.work);
++	bool recover_inline = hba->sm8550_native_sleep_workarounds;
+ 	int ret;
+ 
+ 	scoped_guard(spinlock_irqsave, &hba->clk_gating.lock) {
+@@ -2059,16 +2060,45 @@
+ 
+ 	/* put the link into hibern8 mode before turning off clocks */
+ 	if (ufshcd_can_hibern8_during_gating(hba)) {
++		if (recover_inline)
++			WRITE_ONCE(hba->sm8550_gate_recovery_active, true);
+ 		ret = ufshcd_uic_hibern8_enter(hba);
+ 		if (ret) {
+ 			hba->clk_gating.state = CLKS_ON;
+-			dev_err(hba->dev, "%s: hibern8 enter failed %d\n",
+-					__func__, ret);
+ 			trace_ufshcd_clk_gating(hba,
+ 						hba->clk_gating.state);
++			if (!recover_inline) {
++				dev_err(hba->dev, "%s: hibern8 enter failed %d\n",
++						__func__, ret);
++				return;
++			}
++
++			dev_err(hba->dev,
++				"%s: hibern8 enter failed %d, recovering link\n",
++				__func__, ret);
++			ret = ufshcd_link_recovery(hba);
++
++			scoped_guard(spinlock_irqsave, &hba->clk_gating.lock) {
++				if (hba->clk_gating.is_enabled) {
++					hba->clk_gating.active_reqs++;
++					hba->clk_gating.is_enabled = false;
++				}
++			}
++			WRITE_ONCE(hba->sm8550_gate_recovery_active, false);
++
++			if (ret)
++				dev_err(hba->dev,
++					"%s: link recovery failed %d\n",
++					__func__, ret);
++			else
++				dev_warn(hba->dev,
++					 "%s: link recovered; runtime clock gating disabled\n",
++					 __func__);
+ 			return;
+ 		}
+ 		ufshcd_set_link_hibern8(hba);
++		if (recover_inline)
++			WRITE_ONCE(hba->sm8550_gate_recovery_active, false);
+ 	}
+ 
+ 	ufshcd_disable_irq(hba);
+@@ -4469,7 +4499,8 @@
+ 	spin_lock_irqsave(hba->host->host_lock, flags);
+ 	hba->active_uic_cmd = NULL;
+ 	hba->uic_async_done = NULL;
+-	if (ret && !hba->pm_op_in_progress) {
++	if (ret && !hba->pm_op_in_progress &&
++	    !READ_ONCE(hba->sm8550_gate_recovery_active)) {
+ 		ufshcd_set_link_broken(hba);
+ 		ufshcd_schedule_eh_work(hba);
+ 	}
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -1059,6 +1059,7 @@
+  * @complete_clkgate_hold: whether ufshcd_resume_complete() must release
+  *	clock-gating hold acquired by ufshcd_suspend_prepare()
+  * @sm8550_native_sleep_workarounds: whether the opt-in SM8550 UFS path is active
++ * @sm8550_gate_recovery_active: clock-gate Hibern8 recovery owns UIC errors
+  * @mcq_sup: is mcq supported by UFSHC
+  * @mcq_enabled: is mcq ready to accept requests
+  * @mcq_esi_enabled: is mcq ESI configured
+@@ -1242,6 +1243,7 @@
+ 	bool complete_put;
+ 	bool complete_clkgate_hold;
+ 	bool sm8550_native_sleep_workarounds;
++	bool sm8550_gate_recovery_active;
+ 	bool scsi_host_added;
+ 	bool mcq_sup;
+ 	bool lsdb_sup;

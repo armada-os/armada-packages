@@ -50,9 +50,9 @@ diff --git a/drivers/net/wireless/ath/ath12k/wifi7/hw.c b/drivers/net/wireless/a
 index df045ddf42da..1eebfbb5f7a7 100644
 --- a/drivers/net/wireless/ath/ath12k/wifi7/hw.c
 +++ b/drivers/net/wireless/ath/ath12k/wifi7/hw.c
-@@ -666,6 +666,94 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
+@@ -709,6 +709,94 @@ static const struct ath12k_hw_params ath12k_wifi7_hw_params[] = {
  
- 		.dp_primary_link_only = true,
+ 		.host_alloc_ml_id = true,
  	},
 +	{
 +		.name = "wcn7860 hw2.0",

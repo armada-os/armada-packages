@@ -13,7 +13,7 @@ diff --git a/drivers/bluetooth/btqca.c b/drivers/bluetooth/btqca.c
 index dfbbac92242a..dbe838040a67 100644
 --- a/drivers/bluetooth/btqca.c
 +++ b/drivers/bluetooth/btqca.c
-@@ -13,6 +13,78 @@
+@@ -13,6 +13,79 @@
  
  #include "btqca.h"
  
@@ -53,7 +53,8 @@ index dfbbac92242a..dbe838040a67 100644
 +	}
 +
 +	// Extract the last 6 characters
-+	strncpy(last6, serial + serial_len - 6, 6);
++	for (i = 0; i < 6; i++)
++		last6[i] = serial[serial_len - 6 + i];
 +
 +	// Initialize the first 3 bytes
 +	bdaddr->b[5] = 0x00;
@@ -92,7 +93,7 @@ index dfbbac92242a..dbe838040a67 100644
  int qca_read_soc_version(struct hci_dev *hdev, struct qca_btsoc_version *ver,
  			 enum qca_btsoc_type soc_type)
  {
-@@ -668,7 +740,7 @@ int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdaddr)
+@@ -668,7 +741,7 @@ int qca_set_bdaddr_rome(struct hci_dev *hdev, const bdaddr_t *bdaddr)
  }
  EXPORT_SYMBOL_GPL(qca_set_bdaddr_rome);
  
@@ -101,7 +102,7 @@ index dfbbac92242a..dbe838040a67 100644
  {
  	struct hci_rp_read_bd_addr *bda;
  	struct sk_buff *skb;
-@@ -739,6 +811,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
+@@ -739,6 +812,7 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
  	u8 rom_ver = 0;
  	u32 soc_ver;
  	u16 boardid = 0;
@@ -109,7 +110,7 @@ index dfbbac92242a..dbe838040a67 100644
  
  	bt_dev_dbg(hdev, "QCA setup on UART");
  
-@@ -918,9 +991,30 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
+@@ -918,9 +992,30 @@ int qca_uart_setup(struct hci_dev *hdev, uint8_t baudrate,
  		break;
  	}
  
@@ -181,7 +182,7 @@ diff --git a/drivers/net/wireless/ath/ath12k/mac.c b/drivers/net/wireless/ath/at
 index d493ec812055..0e535e96e27b 100644
 --- a/drivers/net/wireless/ath/ath12k/mac.c
 +++ b/drivers/net/wireless/ath/ath12k/mac.c
-@@ -164,6 +164,91 @@ static const struct ieee80211_channel ath12k_6ghz_channels[] = {
+@@ -164,6 +164,92 @@ static const struct ieee80211_channel ath12k_6ghz_channels[] = {
  	CHAN6G(233, 7115, 0),
  };
  
@@ -226,7 +227,8 @@ index d493ec812055..0e535e96e27b 100644
 +	}
 +
 +	// Extract the last 6 characters
-+	strncpy(last6, serial + serial_len - 6, 6);
++	for (i = 0; i < 6; i++)
++		last6[i] = serial[serial_len - 6 + i];
 +
 +	// Initialize the first 3 bytes
 +	macaddr->b[5] = 0x00;
@@ -273,7 +275,7 @@ index d493ec812055..0e535e96e27b 100644
  #define ATH12K_MAC_RATE_A_M(bps, code) \
  	{ .bitrate = (bps), .hw_value = (code),\
  	  .flags = IEEE80211_RATE_MANDATORY_A }
-@@ -9533,6 +9618,7 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+@@ -9533,6 +9619,7 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
  	struct ath12k_base *ab = ar->ab;
  	struct ath12k_pdev *pdev;
  	struct ath12k_pdev_cap *cap;
@@ -281,7 +283,7 @@ index d493ec812055..0e535e96e27b 100644
  	static const u32 cipher_suites[] = {
  		WLAN_CIPHER_SUITE_TKIP,
  		WLAN_CIPHER_SUITE_CCMP,
-@@ -9556,11 +9642,17 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
+@@ -9556,11 +9643,17 @@ static int ath12k_mac_hw_register(struct ath12k_hw *ah)
  		u32 ht_cap_info = 0;
  
  		pdev = ar->pdev;

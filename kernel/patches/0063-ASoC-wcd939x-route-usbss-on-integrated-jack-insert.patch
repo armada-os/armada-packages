@@ -10,7 +10,7 @@ insert and back on removal, reusing the USBSS audio FSM path.
 ---
 --- a/drivers/usb/typec/mux/wcd939x-usbss.c
 +++ b/drivers/usb/typec/mux/wcd939x-usbss.c
-@@ -752,6 +752,36 @@
+@@ -750,6 +750,36 @@
  	typec_mux_put(usbss->codec);
  }
  
@@ -45,7 +45,7 @@ insert and back on removal, reusing the USBSS audio FSM path.
 +EXPORT_SYMBOL_GPL(wcd939x_usbss_audio_config);
 +
  static const struct i2c_device_id wcd939x_usbss_table[] = {
- 	{ "wcd9390-usbss" },
+ 	{ .name = "wcd9390-usbss" },
  	{ }
 --- a/sound/soc/codecs/wcd-mbhc-v2.h
 +++ b/sound/soc/codecs/wcd-mbhc-v2.h

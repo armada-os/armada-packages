@@ -12,8 +12,8 @@ diff --git a/drivers/input/touchscreen/hynitron_cstxxx.c b/drivers/input/touchsc
 index 1d8ca90dcda695..28fdc6d0cfb743 100644
 --- a/drivers/input/touchscreen/hynitron_cstxxx.c
 +++ b/drivers/input/touchscreen/hynitron_cstxxx.c
-@@ -22,6 +22,7 @@
- #include <linux/mod_devicetable.h>
+@@ -21,6 +21,7 @@
+ #include <linux/input/touchscreen.h>
  #include <linux/module.h>
  #include <linux/property.h>
 +#include <linux/regulator/consumer.h>

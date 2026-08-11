@@ -1,0 +1,255 @@
+From 7be6ece5f00b10297dac32fc9a3aaf7045fb053a Mon Sep 17 00:00:00 2001
+From: Armada <noreply@armada.local>
+Date: Thu, 6 Aug 2026 13:13:58 -0400
+Subject: [PATCH] armada: gate SM8550 native-sleep workarounds at boot
+
+Require sm8550.ns=1 on an SM8550 machine before enabling Armada's
+remaining experimental suspend behavior. Upstream Linux 7.2 PCIe D3cold
+and UFS core behavior is left unchanged.
+---
+diff --git a/drivers/input/joystick/rsinput.c b/drivers/input/joystick/rsinput.c
+--- a/drivers/input/joystick/rsinput.c
++++ b/drivers/input/joystick/rsinput.c
+@@ -18,6 +18,7 @@
+ #include <linux/serdev.h>
+ #include <linux/slab.h>
+ #include <linux/soc/qcom/qcom_hv_haptics.h>
++#include <linux/suspend.h>
+ #include <linux/workqueue.h>
+ #include <uapi/linux/sched/types.h>
+ 
+@@ -653,7 +654,8 @@ static int rsinput_suspend(struct device *dev)
+     if (drv->rumble_work.func)
+         cancel_work_sync(&drv->rumble_work);
+ 
+-    if (!device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
++    if (!sm8550_native_sleep_enabled() ||
++        !device_property_read_bool(dev, "suspend-mcu-on-system-sleep"))
+         return 0;
+ 
+     /*
+diff --git a/drivers/input/touchscreen/edt-ft5x06.c b/drivers/input/touchscreen/edt-ft5x06.c
+--- a/drivers/input/touchscreen/edt-ft5x06.c
++++ b/drivers/input/touchscreen/edt-ft5x06.c
+@@ -30,6 +30,7 @@
+ #include <linux/regmap.h>
+ #include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
++#include <linux/suspend.h>
+ #include <linux/uaccess.h>
+ 
+ #include <linux/unaligned.h>
+@@ -1253,6 +1254,7 @@ static int edt_ft5x06_ts_probe(struct i2c_client *client)
+ 	tsdata->no_regmap_bulk_read =
+ 		device_property_read_bool(&client->dev, "no-regmap-bulk-read");
+ 	tsdata->retain_power_in_suspend =
++		sm8550_native_sleep_enabled() &&
+ 		device_property_read_bool(&client->dev,
+ 					  "edt,retain-power-in-suspend");
+ 
+diff --git a/drivers/pci/controller/dwc/pcie-qcom.c b/drivers/pci/controller/dwc/pcie-qcom.c
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -33,6 +33,7 @@
+ #include <linux/regulator/consumer.h>
+ #include <linux/reset.h>
+ #include <linux/slab.h>
++#include <linux/suspend.h>
+ #include <linux/types.h>
+ #include <linux/units.h>
+ 
+@@ -2183,7 +2184,8 @@ static int qcom_pcie_set_suspend_opp(struct qcom_pcie *pcie)
+ 	unsigned long freq;
+ 	int ret;
+ 
+-	if (!of_device_is_compatible(dev->of_node, "qcom,pcie-sm8550"))
++	if (!sm8550_native_sleep_enabled() ||
++	    !of_device_is_compatible(dev->of_node, "qcom,pcie-sm8550"))
+ 		return dev_pm_opp_set_opp(dev, NULL);
+ 
+ 	freq = dev_pm_opp_get_suspend_opp_freq(dev);
+diff --git a/drivers/thermal/qcom/tsens.c b/drivers/thermal/qcom/tsens.c
+--- a/drivers/thermal/qcom/tsens.c
++++ b/drivers/thermal/qcom/tsens.c
+@@ -1230,7 +1230,7 @@ static bool tsens_irq_wake_enabled(const char *irqname)
+ 
+ static bool tsens_irq_wake_enabled(const char *irqname)
+ {
+-	if (!of_machine_is_compatible("qcom,sm8550"))
++	if (!sm8550_native_sleep_enabled())
+ 		return true;
+ 
+ 	/* Keep critical thermal wake; only passive threshold-window IRQs are noisy. */
+diff --git a/drivers/tty/serial/qcom_geni_serial.c b/drivers/tty/serial/qcom_geni_serial.c
+--- a/drivers/tty/serial/qcom_geni_serial.c
++++ b/drivers/tty/serial/qcom_geni_serial.c
+@@ -20,6 +20,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/pm_wakeirq.h>
+ #include <linux/soc/qcom/geni-se.h>
++#include <linux/suspend.h>
+ #include <linux/serial.h>
+ #include <linux/serial_core.h>
+ #include <linux/slab.h>
+@@ -1991,6 +1992,7 @@ static int qcom_geni_serial_suspend(struct device *dev)
+ 	 * qcom_geni_serial_resume().
+ 	 */
+ 	if (!uart_console(uport) &&
++	    sm8550_native_sleep_enabled() &&
+ 	    device_property_read_bool(dev, "qcom,mask-irq-on-suspend") &&
+ 	    !device_may_wakeup(dev))
+ 		disable_irq(uport->irq);
+@@ -2016,6 +2018,7 @@ static int qcom_geni_serial_resume(struct device *dev)
+ 	ret = uart_resume_port(private_data->drv, uport);
+ 	/* Balance the disable_irq() taken in qcom_geni_serial_suspend(). */
+ 	if (!uart_console(uport) &&
++	    sm8550_native_sleep_enabled() &&
+ 	    device_property_read_bool(dev, "qcom,mask-irq-on-suspend") &&
+ 	    !device_may_wakeup(dev))
+ 		enable_irq(uport->irq);
+diff --git a/drivers/ufs/core/ufshcd.c b/drivers/ufs/core/ufshcd.c
+--- a/drivers/ufs/core/ufshcd.c
++++ b/drivers/ufs/core/ufshcd.c
+@@ -15,6 +15,7 @@
+ #include <linux/of.h>
+ #include <linux/bitfield.h>
+ #include <linux/blk-pm.h>
++#include <linux/suspend.h>
+ #include <linux/blkdev.h>
+ #include <linux/clk.h>
+ #include <linux/delay.h>
+@@ -10954,6 +10955,12 @@ int ufshcd_alloc_host(struct device *dev, struct ufs_hba **hba_handle)
+ 	hba = shost_priv(host);
+ 	hba->host = host;
+ 	hba->dev = dev;
++	hba->sm8550_native_sleep_workarounds =
++		sm8550_native_sleep_enabled() &&
++		of_device_is_compatible(dev->of_node, "qcom,sm8550-ufshc");
++	/* SM8550 UFS recovery needs a 3000 ms UIC timeout. */
++	if (hba->sm8550_native_sleep_workarounds)
++		uic_cmd_timeout = 3000;
+ 	hba->dev_ref_clk_freq = REF_CLK_FREQ_INVAL;
+ 	hba->nop_out_timeout = NOP_OUT_TIMEOUT;
+ 	ufshcd_set_sg_entry_size(hba, sizeof(struct ufshcd_sg_entry));
+@@ -11316,7 +11323,7 @@ void ufshcd_resume_complete(struct device *dev)
+ {
+ 	struct ufs_hba *hba = dev_get_drvdata(dev);
+ 
+-	if (of_device_is_compatible(hba->dev->of_node, "qcom,sm8550-ufshc") &&
++	if (hba->sm8550_native_sleep_workarounds &&
+ 	    hba->complete_clkgate_hold) {
+ 		hba->complete_clkgate_hold = false;
+ 		ufshcd_release(hba);
+@@ -11380,8 +11387,7 @@ int __ufshcd_suspend_prepare(struct device *dev, bool rpm_ok_for_spm)
+ 			 * Serialize system PM against the asynchronous clock-gating
+ 			 * worker while normal IRQ completion is still available.
+ 			 */
+-			if (of_device_is_compatible(hba->dev->of_node,
+-						    "qcom,sm8550-ufshc")) {
++			if (hba->sm8550_native_sleep_workarounds) {
+ 				ufshcd_hold(hba);
+ 				hba->complete_clkgate_hold = true;
+ 			}
+diff --git a/drivers/ufs/host/ufs-qcom.c b/drivers/ufs/host/ufs-qcom.c
+--- a/drivers/ufs/host/ufs-qcom.c
++++ b/drivers/ufs/host/ufs-qcom.c
+@@ -17,6 +17,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/pm_domain.h>
+ #include <linux/reset-controller.h>
++#include <linux/suspend.h>
+ #include <linux/time.h>
+ #include <linux/unaligned.h>
+ #include <linux/units.h>
+@@ -723,8 +724,7 @@ static bool ufs_qcom_sm8550_suspend_workarounds(struct ufs_hba *hba)
+ 
+ static bool ufs_qcom_sm8550_suspend_workarounds(struct ufs_hba *hba)
+ {
+-	return of_device_is_compatible(hba->dev->of_node,
+-				       "qcom,sm8550-ufshc");
++	return hba->sm8550_native_sleep_workarounds;
+ }
+ 
+ static int ufs_qcom_link_startup_notify(struct ufs_hba *hba,
+diff --git a/include/linux/suspend.h b/include/linux/suspend.h
+--- a/include/linux/suspend.h
++++ b/include/linux/suspend.h
+@@ -442,6 +442,12 @@ static inline int is_hibernate_resume_dev(dev_t dev) { return 0; }
+ 
+ extern struct mutex system_transition_mutex;
+ 
++#ifdef CONFIG_PM
++bool sm8550_native_sleep_enabled(void);
++#else
++static inline bool sm8550_native_sleep_enabled(void) { return false; }
++#endif
++
+ #ifdef CONFIG_PM_SLEEP
+ void save_processor_state(void);
+ void restore_processor_state(void);
+diff --git a/include/ufs/ufshcd.h b/include/ufs/ufshcd.h
+--- a/include/ufs/ufshcd.h
++++ b/include/ufs/ufshcd.h
+@@ -1058,6 +1058,7 @@ struct ufs_hba_variant_params {
+  *	ufshcd_resume_complete()
+  * @complete_clkgate_hold: whether ufshcd_resume_complete() must release
+  *	clock-gating hold acquired by ufshcd_suspend_prepare()
++ * @sm8550_native_sleep_workarounds: whether the opt-in SM8550 UFS path is active
+  * @mcq_sup: is mcq supported by UFSHC
+  * @mcq_enabled: is mcq ready to accept requests
+  * @mcq_esi_enabled: is mcq ESI configured
+@@ -1240,6 +1241,7 @@ struct ufs_hba {
+ 	unsigned int nr_queues[HCTX_MAX_TYPES];
+ 	bool complete_put;
+ 	bool complete_clkgate_hold;
++	bool sm8550_native_sleep_workarounds;
+ 	bool scsi_host_added;
+ 	bool mcq_sup;
+ 	bool lsdb_sup;
+diff --git a/kernel/power/main.c b/kernel/power/main.c
+--- a/kernel/power/main.c
++++ b/kernel/power/main.c
+@@ -10,6 +10,7 @@
+ #include <linux/export.h>
+ #include <linux/init.h>
+ #include <linux/kobject.h>
++#include <linux/of.h>
+ #include <linux/string.h>
+ #include <linux/pm-trace.h>
+ #include <linux/workqueue.h>
+@@ -23,6 +24,33 @@
+ 
+ #include "power.h"
+ 
++static bool sm8550_native_sleep;
++static bool sm8550_machine;
++
++static int __init sm8550_native_sleep_setup(char *value)
++{
++	sm8550_native_sleep = value && !strcmp(value, "1");
++	return 0;
++}
++early_param("sm8550.ns", sm8550_native_sleep_setup);
++
++bool sm8550_native_sleep_enabled(void)
++{
++	return sm8550_native_sleep && sm8550_machine;
++}
++EXPORT_SYMBOL_GPL(sm8550_native_sleep_enabled);
++
++static int __init sm8550_native_sleep_init(void)
++{
++	sm8550_machine = of_machine_is_compatible("qcom,sm8550");
++
++	if (sm8550_native_sleep_enabled())
++		pr_info("PM: SM8550 native-sleep workarounds enabled\n");
++
++	return 0;
++}
++core_initcall(sm8550_native_sleep_init);
++
+ #ifdef CONFIG_PM_SLEEP
+ /*
+  * The following functions are used by the suspend/hibernate code to temporarily
+-- 
+2.55.0

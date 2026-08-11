@@ -10,9 +10,9 @@ diff --git a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c b/drivers/gpu/drm/msm/adr
 index 550ff3a9b82e..a97bf2c0c89d 100644
 --- a/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
 +++ b/drivers/gpu/drm/msm/adreno/a6xx_catalog.c
-@@ -1799,6 +1799,272 @@ static const struct adreno_reglist_pipe x285_dyn_pwrup_reglist_regs[] = {
+@@ -2056,6 +2056,272 @@ static const struct adreno_reglist_pipe a810_dyn_pwrup_reglist_regs[] = {
  };
- DECLARE_ADRENO_REGLIST_PIPE_LIST(x285_dyn_pwrup_reglist);
+ DECLARE_ADRENO_REGLIST_PIPE_LIST(a810_dyn_pwrup_reglist);
  
 +static const struct adreno_reglist_pipe a830_nonctxt_regs[] = {
 +	{ REG_A8XX_CP_SMMU_STREAM_ID_LPAC, 0x00000101, BIT(PIPE_NONE) },
@@ -345,4 +345,3 @@ index c0ee544ce257..2dd009b1ced5 100644
  	return gpu->info->chip_ids[0] == 0x44050a01;
 -- 
 2.43.0
-
