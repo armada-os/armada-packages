@@ -26,3 +26,5 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
   source: armada
 - `patches/0011-main-add-opt-in-force-vulkan-realtime.patch`
   source: armada
+- `patches/0012-color-scale-gamma22-sdr-white-only-with-hdr-content.patch`
+  source: armada
