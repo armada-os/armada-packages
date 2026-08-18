@@ -1,0 +1,123 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: qcom_battmgr: add USB ICL and PPS setters
+
+The SM8550 battery-manager protocol defines USB_PROPERTY_SET and the
+USB_INPUT_CURR_LIMIT property, but the Linux driver only exposes the value as
+read-only.  Charge-pump policy needs to lower the PMIC switching charger's
+share of the negotiated PD current before enabling a parallel external pump.
+
+The Pocket EVO Android charger manager also writes USB_VOLT_NOW to request a
+new PPS voltage, after confirming USB_ADAP_TYPE is PD_PPS (8).  Reproduce both
+factory interfaces, serialize them with existing property traffic, and handle
+the SET acknowledgement.  Do not read ICL back to verify it: firmware reports
+the negotiated adapter limit rather than the active buck-charger vote even
+though the 13 mA vote has already taken effect.
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -990,6 +990,66 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 	return 0;
+ }
+ 
++static int qcom_battmgr_usb_set_property(struct power_supply *psy,
++					 enum power_supply_property psp,
++					 const union power_supply_propval *pval)
++{
++	struct qcom_battmgr *battmgr = power_supply_get_drvdata(psy);
++	unsigned int property;
++	int ret;
++
++	if (!battmgr->service_up)
++		return -EAGAIN;
++	if (pval->intval < 0)
++		return -EINVAL;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		property = USB_INPUT_CURR_LIMIT;
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		property = USB_VOLT_NOW;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	mutex_lock(&battmgr->lock);
++	if (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW) {
++		ret = qcom_battmgr_request_property(battmgr,
++						    BATTMGR_USB_PROPERTY_GET,
++						    USB_ADAP_TYPE, 0);
++		if (ret)
++			goto out_unlock;
++		if (battmgr->usb.adapter_type != 8) {
++			ret = -EOPNOTSUPP;
++			goto out_unlock;
++		}
++	}
++
++	ret = qcom_battmgr_request_property(battmgr,
++					    BATTMGR_USB_PROPERTY_SET,
++					    property,
++					    pval->intval);
++	if (!ret && psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT)
++		battmgr->usb.current_limit = pval->intval;
++
++out_unlock:
++	mutex_unlock(&battmgr->lock);
++
++	if (!ret)
++		power_supply_changed(battmgr->usb_psy);
++
++	return ret;
++}
++
++static int qcom_battmgr_usb_is_writeable(struct power_supply *psy,
++					  enum power_supply_property psp)
++{
++	return psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT ||
++	       psp == POWER_SUPPLY_PROP_VOLTAGE_NOW;
++}
++
+ static const enum power_supply_property sc8280xp_usb_props[] = {
+ 	POWER_SUPPLY_PROP_ONLINE,
+ };
+@@ -1026,6 +1086,8 @@ static const struct power_supply_desc sm8350_usb_psy_desc = {
+ 	.properties = sm8350_usb_props,
+ 	.num_properties = ARRAY_SIZE(sm8350_usb_props),
+ 	.get_property = qcom_battmgr_usb_get_property,
++	.set_property = qcom_battmgr_usb_set_property,
++	.property_is_writeable = qcom_battmgr_usb_is_writeable,
+ 	.usb_types = BIT(POWER_SUPPLY_USB_TYPE_UNKNOWN) |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_SDP)     |
+ 		     BIT(POWER_SUPPLY_USB_TYPE_DCP)     |
+@@ -1442,6 +1504,29 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+ 			break;
+ 		}
+ 		break;
++	case BATTMGR_USB_PROPERTY_SET:
++		property = le32_to_cpu(resp->intval.property);
++		if (payload_len != sizeof(resp->intval)) {
++			dev_warn(battmgr->dev,
++				 "invalid payload length for %#x set request: %zd\n",
++				 property, payload_len);
++			battmgr->error = -ENODATA;
++			return;
++		}
++		val = le32_to_cpu(resp->intval.result);
++		if (val) {
++			dev_warn(battmgr->dev,
++				 "firmware rejected USB property %#x: %#x\n",
++				 property, val);
++			battmgr->error = -EIO;
++		} else {
++			battmgr->error = 0;
++		}
++		if (property != USB_INPUT_CURR_LIMIT &&
++		    property != USB_VOLT_NOW)
++			dev_warn(battmgr->dev,
++				 "unknown writable USB property %#x\n", property);
++		break;
+ 	case BATTMGR_WLS_PROPERTY_GET:
+ 		property = le32_to_cpu(resp->intval.property);
+ 		if (payload_len != sizeof(resp->intval)) {

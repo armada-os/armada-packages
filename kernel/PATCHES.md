@@ -264,6 +264,22 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: armada
   upstream: local
   notes: Armada wrote this diagnostic patch to log the USB type and Qualcomm firmware's adapter type when either value changes.
+- `patches/0901-power-supply-qcom-battmgr-set-usb-input-current-limit.patch`
+  source: armada
+  upstream: local
+  notes: Adds the two Qualcomm PMIC-GLINK controls used by Android's direct-charge policy: USB input-current limit (firmware property 5) and PPS voltage request (firmware property 1, gated on adapter type PD_PPS/8). Testing the exact Android protocol on Pocket EVO confirmed that a 13 mA input-current vote quiesces the Qualcomm buck even though the firmware continues to report the negotiated 3 A adapter capability; consequently the setter trusts the acknowledged write instead of rejecting it on that misleading readback. Independently re-verified on 2026-08-17: writing 13 mA to `input_current_limit` dropped USB input current 1.87 A -> 0 A and battery went from charging to discharging at ~4.9 A while the readback stayed frozen at 3 A, confirming the write path works and the readback is not the active vote.
+- `patches/0063-power-supply-add-HL7139-charge-pump.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/caa36c39225e7f1bd58fd2017dafa87cb79086d4/projects/ROCKNIX/devices/SM8250/patches/linux/0063_Mangmi-Pocket-Max-HL7139-charge-pump.patch
+  upstream: unknown
+  notes: Armada extends the ROCKNIX regmap/power-supply driver for Pocket EVO's parallel pumps: the Android factory register sequence, unique master/slave supply names, disabled-at-probe/remove behavior, IRQ-driven health/fault shutdown, and conservative enable gates for VBUS-good, no latched faults, 8-10 V input, 3.5-4.45 V battery, and a maximum 90 C die temperature. The 4.45 V enable ceiling matches the EVO factory DTBO's `vbatovp_alm`; the pumps retain their independently programmed 4.50 V `vbatovp` hardware cutoff. A dual-pump validation sustained a 27.2-27.5 W adapter request and 25.8-26.0 W at the pump inputs, with approximately 1.49/1.47 A pump balance, 4.8 A battery current, both supplies healthy, and no guard or kernel faults. Android's VBAT_OVP, IBAT_OCP, and IBUS_OCP fields are protections rather than Linux regulator limits, so only `ONLINE` is writable.
+- `patches/0903-power-supply-hl7139-suspend-safety.patch`
+  source: armada
+  upstream: local
+  notes: Disables both HL7139 charge pumps unconditionally on suspend and leaves them off on resume. The pumps sit between VBUS and the battery with no PMIC supervision of their own; a direct-charge session left running through a suspend cycle is an uncontrolled charge path while the SoC is asleep. The userspace charge-policy service re-establishes a session only after its full eligibility re-check, so an interrupted session is not blindly resumed. This closes the suspend gap in the base 0063 driver, which only disabled the pumps on remove.
+- `patches/0904-power-supply-qcom-battmgr-charging-status.patch`
+  source: armada
+  upstream: local
+  notes: During direct charging the HL7139 pumps feed the battery and the Qualcomm buck is quiesced to 13 mA, so the battery-manager firmware reports Discharging even while ~4.8 A flows into the cell. This makes the battery supply report Charging whenever either hl7139 pump is online, so UPower/SteamOS show the correct icon. No-op on devices without the pumps.
 - `patches/0001-pcie-update-sm8650-dtsi.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8650/patches/linux/0001-pcie-update-sm8650-dtsi.patch
   upstream: https://lore.kernel.org/r/20260611-wake-v2-35-2744251b1181@oss.qualcomm.com
@@ -455,6 +471,9 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pocketds.dts
 - `dts/qcs8550-ayaneo-pocketevo.dts`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pocketevo.dts
+- `dts/qcs8550-ayaneo-pocketevo.dts.patch`
+  source: armada
+  notes: Declares the Pocket EVO's Android-confirmed HL7139 slave at 0x5e (GPIO9 IRQ) and master at 0x5f (GPIO8 IRQ) on QUP hub I2C2. Both bind disabled and require an explicit charge-policy action after a valid PPS contract and Qualcomm-buck handoff.
 - `dts/qcs8550-ayaneo-pockets2k.dts`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pockets2k.dts
 - `dts/qcs8550-ayn-common.dtsi`

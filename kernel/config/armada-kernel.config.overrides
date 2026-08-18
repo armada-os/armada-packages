@@ -265,6 +265,7 @@ CONFIG_DRM_PANEL_AR14=y                     # KONKR Pocket FIT + Pocket FIT Elit
 CONFIG_TOUCHSCREEN_CHIPONE_TDDI=m           # KONKR Pocket FIT + Elite (ICNL9922C)
 CONFIG_TOUCHSCREEN_GOODIX=m                 # Pocket S2 + Pocket DS
 CONFIG_ATH12K=m                             # WCN7850/WCN7860 Wi-Fi (SM8650 + SM8750)
+CONFIG_CHARGER_HL7139=m                     # Pocket EVO dual charge pumps
 
 # ============== SM8250 (Retroid Pocket 5, Mini, Mini V2, Flip2) ==============
 CONFIG_SM_GCC_8250=y
