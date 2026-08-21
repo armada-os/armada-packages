@@ -1,0 +1,35 @@
+From: Rayek <Rayekkk@users.noreply.github.com>
+Subject: [PATCH] color: scale Gamma 2.2 SDR white only with HDR content
+
+A Gamma 2.2 HDR-capable output can remain enabled while gamescope is
+compositing only SDR content. In that state there is no HDR headroom to
+reserve, and applying the SDR-on-HDR white scale unnecessarily limits the
+entire SDR frame.
+
+Use gamescope's existing focused-app HDR signal to gate the traditional-HDR
+scale. The resulting boolean already participates in LUT cache currentness,
+so entering or leaving HDR content rebuilds the LUTs with the appropriate
+gain.
+
+diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
+--- a/src/steamcompmgr.cpp
++++ b/src/steamcompmgr.cpp
+@@ -159,6 +159,7 @@ static lut3d_t g_tmpLut3d;
+ extern int g_nDynamicRefreshHz;
+ 
+ bool g_bForceHDRSupportDebug = false;
++extern bool g_bAppWantsHDRCached;
+ extern float g_flInternalDisplayBrightnessNits;
+ extern float g_flHDRItmSdrNits;
+ extern float g_flHDRItmTargetNits;
+@@ -482,7 +483,10 @@ update_color_mgmt()
+ 	if ( !GetBackend()->GetCurrentConnector() )
+ 		return;
+ 
++	// The output can stay in HDR while only SDR content is being composited.
++	// Reserve SDR headroom only when the base layer actually requests HDR.
+ 	const bool bTraditionalHDROutput = g_bOutputHDREnabled &&
++		g_bAppWantsHDRCached &&
+ 		GetBackend()->GetCurrentConnector()->GetHDRInfo().IsHDRG22();
+ 
+ 	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(
