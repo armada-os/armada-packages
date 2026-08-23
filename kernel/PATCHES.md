@@ -550,6 +550,9 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `dts/qcs8550-ayn-common.dtsi.patch`
   source: armada
   notes: Armada keeps volume-up from waking the system, removes the SDHCI capability mask, and marks the shared RSInput node as connected to the PM8550B haptics device declared in the same common tree. This intentionally covers the AYN and Retroid products that inherit both nodes, including Pocket 6 and Nova.
+- `dts/qcs8550-ayn-odin2portal.dts.patch`
+  source: armada
+  notes: Adds the back buttons from the Odin 2 DTS into the Odin 2 Portal DTS
 - `dts/qcs8550-retroidpocket-rp6.dts.patch`
   source: armada
   notes: Armada switches Pocket 6 from ROCKNIX's Odin 2 fallback to audio firmware extracted from a Pocket 6 vendor image.
