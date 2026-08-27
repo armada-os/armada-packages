@@ -20,3 +20,4 @@ jobs:
     with:
       package: kernel
       branch: ${{ inputs.branch || '' }}
+      runner: self-hosted
