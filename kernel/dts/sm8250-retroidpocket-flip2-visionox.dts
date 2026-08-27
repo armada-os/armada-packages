@@ -14,7 +14,7 @@
 
 &mdss_dsi0 {
 	panel@0 {
-		compatible = "visionox,vtdr6130-flip2";
+		compatible = "vtdr6130,rpflip2";
 		reset-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
 	};
 };
