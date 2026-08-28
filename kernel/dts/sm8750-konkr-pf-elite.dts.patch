@@ -7,6 +7,14 @@ Elite touchscreen using the vendor properties consumed by that driver.
 
 --- a/arch/arm64/boot/dts/qcom/sm8750-konkr-pf-elite.dts
 +++ b/arch/arm64/boot/dts/qcom/sm8750-konkr-pf-elite.dts
+@@ -122,7 +122,6 @@
+ 			linux,code = <KEY_VOLUMEUP>;
+ 			gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+ 			debounce-interval = <15>;
+-			wakeup-source;
+ 		};
+ 		key-rc2 {
+ 			label = "Right-C2";
 @@ -913,14 +913,11 @@
  /* Touchscreen = Chipone TDDI (touch half of the display driver IC; powered
   * by the panel rails, no separate supplies — matches the stock node having

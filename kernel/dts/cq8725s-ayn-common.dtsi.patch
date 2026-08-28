@@ -3,6 +3,14 @@ Subject: [PATCH] arm64: dts: qcom: cq8725s: configure the Odin 3 gamepad
 
 --- a/arch/arm64/boot/dts/qcom/cq8725s-ayn-common.dtsi
 +++ b/arch/arm64/boot/dts/qcom/cq8725s-ayn-common.dtsi
+@@ -113,7 +113,6 @@
+ 			gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+ 			debounce-interval = <15>;
+ 			linux,can-disable;
+-			wakeup-source;
+ 		};
+ 	};
+ 
 @@ -1390,6 +1390,9 @@
  
  	gamepad {

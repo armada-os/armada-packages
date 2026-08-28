@@ -1,0 +1,22 @@
+name: armada-rgb
+on:
+  push:
+    branches: [main]
+    paths: ['armada-rgb/**', 'oci/**', '.github/workflows/armada-rgb.yml', '.github/workflows/_package-image.yml', 'toolchain.env']
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Branch to build and publish as a matching container tag. Leave empty to use the workflow ref."
+        type: string
+        default: ""
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+jobs:
+  build:
+    uses: ./.github/workflows/_package-image.yml
+    secrets: inherit
+    with:
+      package: armada-rgb
+      branch: ${{ inputs.branch || '' }}

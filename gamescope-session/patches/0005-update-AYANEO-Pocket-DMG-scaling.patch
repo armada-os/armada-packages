@@ -1,0 +1,25 @@
+From 6a6f8216c36836fdf38571c259a811a105e55033 Mon Sep 17 00:00:00 2001
+From: Radical <radical@radical.fun>
+Date: Wed, 5 Aug 2026 05:29:35 +0200
+Subject: [PATCH 2/4] update AYANEO Pocket DMG scaling
+
+---
+ usr/share/gamescope-session-plus/device-quirks | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/usr/share/gamescope-session-plus/device-quirks b/usr/share/gamescope-session-plus/device-quirks
+index bb4a6b7..182afec 100644
+--- a/usr/share/gamescope-session-plus/device-quirks
++++ b/usr/share/gamescope-session-plus/device-quirks
+@@ -251,7 +251,7 @@ if [[ ":AYANEO Pocket DMG:" =~ ":$SYS_ID:" ]]; then
+   ORIENTATION=left
+   CUSTOM_REFRESH_RATES=60
+   OUTPUT_CONNECTOR='*,DSI-1'
+-  FAKE_OUTPUT_MM=65x75
++  FAKE_OUTPUT_MM=177x100
+ 
+   export STEAM_DISPLAY_REFRESH_LIMITS=60
+ fi
+-- 
+2.55.0
+

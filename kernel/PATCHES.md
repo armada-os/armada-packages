@@ -90,6 +90,9 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0062-backlight-aw99706-honor-blank-power-state.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0062-backlight-aw99706-honor-blank-power-state.patch
   upstream: unknown
+- `patches/0065-backlight-aw99706-use-dt-binding-property-names.patch`
+  source: https://github.com/mrdidit/distribution/blob/b14788a72b7399f03aad2cdcced2e3b91ae15810/projects/ROCKNIX/devices/SM8750/patches/linux/0065-backlight-aw99706-use-dt-binding-property-names.patch
+  upstream: unknown
 - `patches/0015-touchscreen-edt-ft5x06-allow-to-override-input-name.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8250/patches/linux/0015-touchscreen-edt-ft5x06-allow-to-override-input-name.patch
   upstream: https://lore.kernel.org/r/20260409-ft5x06-label-v1-1-21e8a9ae9a60@gmail.com
@@ -115,6 +118,14 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0054-input-goodix-override-resolution-from-dt.patch
   upstream: unknown
   notes: Armada replaced ROCKNIX's automatic resolution-mismatch heuristic and hardcoded fallback with explicit `goodix,native-size-x` and `goodix,native-size-y` properties. Scaling is dormant unless a device opts in with both native and standard touchscreen dimensions.
+- `patches/0054a-dt-bindings-input-goodix-document-input-device-label.patch`
+  source: armada
+  upstream: local
+  notes: Documents the optional Goodix `label` property used to name the input device.
+- `patches/0054b-input-goodix-allow-overriding-input-device-name.patch`
+  source: armada
+  upstream: local
+  notes: Allows the Pocket DS lower GT911 to expose its `bottom_touchscreen` label as the input device name.
 - `patches/0029-Input-edt-ft5x06-add-no_regmap_bulk_read-option.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0029-Input-edt-ft5x06-add-no_regmap_bulk_read-option.patch
   upstream: https://lore.kernel.org/r/20260723-b4-ft5426-v1-3-d4b4e32be042@gmail.com
@@ -140,6 +151,10 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0508-input-rsinput-add-pm-resume-to-reinit-mcu-after-suspend.patch
   upstream: unknown
+- `patches/0515-input-rsinput-reassemble-uart-frames-instead-of-dropping-them.patch`
+  source: armada
+  upstream: not submitted
+  notes: serdev delivers arbitrary byte batches and the old parser dropped any batch that was not exactly one frame, visible as resume-correlated checksum mismatches on the rsinput gamepad devices.
 - `patches/0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8250/patches/linux/0504-Enable-64-bit-processes-to-use-compat-input-syscalls.patch
   upstream: unknown
@@ -173,6 +188,13 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: armada
   upstream: local
   notes: The imported periodic-sine compatibility patch changed zero-amplitude updates to gain 1, then stopped the motor five seconds later. The configured brake pattern made that stop a distinct delayed tap. Zero-amplitude updates now erase immediately, a following playback request cannot restart stale motor state when no effect is loaded, and in-place gain updates balance their transient runtime-PM reference.
+- `patches/1005-input-rsinput-quiesce-the-mcu-across-system-sleep.patch`
+  source: https://github.com/shuuri-labs/pocknix-os/blob/d2544c1481b55e9dec18ff74a8751d4a67b351f8/kernel/sm8550/patches/20-sm8550/1004-input-rsinput-suspend-resume-gamepad-mcu.patch
+  upstream: local
+  notes: Carries only the suspend-side MCU quiesce from the source patch; the source's resume and pm_ops additions are omitted because this tree already has both and rsinput_init_commands() performs the full power-on itself.
+- `patches/1006-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch`
+  source: https://github.com/thorch-os/thorch/blob/2614a262d7de3f31bd47a0c92981461146663847/packages/linux-thorch/patches/0010-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch
+  upstream: unknown
 - `patches/1300-input-rsinput-axis-deadzone.patch`
   source: armada
   upstream: local
@@ -229,13 +251,17 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0512-PCI-qcom-skip-L23-ready-poll-on-SM8550.patch`
   source: armada
   upstream: local
-- `patches/1031-revert-clk-regmap-phy-mux-rate-based-rework.patch`
+- `patches/0513-PCI-qcom-honour-an-opp-suspend-opp-as-the-non-s2ram-memory-floor.patch`
   source: armada
-  upstream: revert of https://github.com/torvalds/linux/commit/e108373c54fbc844b7f541c6fd7ecb31772afd3c
-  notes: Root-cause carry for the SM8550 wifi regression on Linux 7.2, hardware-validated on the Odin 2 Portal. The reverted commit (patch 1 of the "phy_fastclk" series) switched the PCIe pipe-clock mux from enable/disable ops to rate-based ops, but the series' consumer patches never merged, so nothing in 7.2-rc7 can switch the mux to the PHY source. Boards handed over with the mux parked on XO then run the QMP PHY bring-up on the wrong pipe clock and the WCN7850 link never leaves Detect. Restoring the enable-op contract restores the working 7.1 behavior. Drop when upstream lands the consumer side or reverts the rework.
+  upstream: not submitted
+  notes: On OPP-scaling platforms the OPP carries the only PCIe memory-path votes, so dropping it to NULL on non-S2RAM suspend leaves the RPMh sleep set with no DDR/LLCC contract and the AOP never resumes. Deliberately does not populate `pcie->icc_mem` on OPP platforms: `qcom_pcie_icc_opp_update()` prefers an `icc_mem` handle over the OPP branch, so providing one silently disables the post-link-training OPP update and pins the OPP at the probe-time maximum.
 - `patches/0001-pcie-update-sm8550-dtsi.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0001-pcie-update-sm8550-dtsi.patch
   upstream: https://lore.kernel.org/r/20260611-wake-v2-33-2744251b1181@oss.qualcomm.com
+- `patches/0520-arm64-dts-qcom-sm8550-add-a-pcie-suspend-opp.patch`
+  source: armada
+  upstream: not submitted
+  notes: Companion DT for 0513. `opp-hz` is synthetic and `opp-level` is omitted so the OPP can never be selected for a trained link by either match in `qcom_pcie_icc_opp_update()`. pcie1 is disabled in the SM8550 board DTS files that use this table and gets no suspend OPP.
 - `patches/0120-20250728_konradybcio_gpu_cc_power_requirements_reality_check.patch`
   source: https://github.com/ROCKNIX/distribution/blob/ef264a238d5e2ba960145e3fda663dc27de49a80/projects/ROCKNIX/devices/SM8550/patches/linux/0120-20250728_konradybcio_gpu_cc_power_requirements_reality_check.patch
   upstream: https://lore.kernel.org/r/20250728-topic-gpucc_power_plumbing-v1-22-09c2480fe3e6@oss.qualcomm.com
@@ -267,7 +293,7 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0901-power-supply-qcom-battmgr-set-usb-input-current-limit.patch`
   source: armada
   upstream: local
-  notes: Adds the two Qualcomm PMIC-GLINK controls used by Android's direct-charge policy: USB input-current limit (firmware property 5) and PPS voltage request (firmware property 1, gated on adapter type PD_PPS/8). Testing the exact Android protocol on Pocket EVO confirmed that a 13 mA input-current vote quiesces the Qualcomm buck even though the firmware continues to report the negotiated 3 A adapter capability; consequently the setter trusts the acknowledged write instead of rejecting it on that misleading readback. Independently re-verified on 2026-08-17: writing 13 mA to `input_current_limit` dropped USB input current 1.87 A -> 0 A and battery went from charging to discharging at ~4.9 A while the readback stayed frozen at 3 A, confirming the write path works and the readback is not the active vote.
+  notes: Adds the two Qualcomm PMIC-GLINK controls used by Android's direct-charge policy: USB input-current limit (firmware property 5) and PPS voltage request (firmware property 1, gated on adapter type PD_PPS/8). Testing the exact Android protocol on Pocket EVO confirmed that a 13 mA input-current vote quiesces the Qualcomm buck even though the firmware continues to report the negotiated 3 A adapter capability; consequently the setter trusts the acknowledged write instead of rejecting it on that misleading readback. Independently re-verified on 2026-08-17: writing 13 mA to `input_current_limit` dropped USB input current 1.87 A -> 0 A and battery went from charging to discharging at ~4.9 A while the readback stayed frozen at 3 A, confirming the write path works and the readback is not the active vote. Patch 0907 bounds this setter (3 A / 3.3-10.5 V / 20 mV grid) and correlates SET replies with the outstanding property.
 - `patches/0063-power-supply-add-HL7139-charge-pump.patch`
   source: https://github.com/ROCKNIX/distribution/blob/caa36c39225e7f1bd58fd2017dafa87cb79086d4/projects/ROCKNIX/devices/SM8250/patches/linux/0063_Mangmi-Pocket-Max-HL7139-charge-pump.patch
   upstream: unknown
@@ -279,7 +305,27 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0904-power-supply-qcom-battmgr-charging-status.patch`
   source: armada
   upstream: local
-  notes: During direct charging the HL7139 pumps feed the battery and the Qualcomm buck is quiesced to 13 mA, so the battery-manager firmware reports Discharging even while ~4.8 A flows into the cell. This makes the battery supply report Charging whenever either hl7139 pump is online, so UPower/SteamOS show the correct icon. No-op on devices without the pumps.
+  notes: During direct charging the HL7139 pumps feed the battery and the Qualcomm buck is quiesced to 13 mA, so the battery-manager firmware reports Discharging even while ~4.8 A flows into the cell. The battery supply reports Charging only when BOTH hl7139 pumps are online — a lone enabled pump is an asymmetric fault, not charging — so a stuck single pump can no longer masquerade as healthy direct charging. No-op on devices without the pumps.
+- `patches/0902-power-supply-qcom-battmgr-report-pd-pps-adapter.patch`
+  source: armada
+  upstream: local
+  notes: Pocket EVO firmware reports USB_TYPE as SDP even when the separate USB_ADAP_TYPE field correctly reports PD_PPS (8), so the generic usb_type sysfs value cannot gate direct charging (a policy gating on it can never fire). The USB_TYPE property now reports PD_PPS only when the best-effort adapter query completed fresh with the raw value 8, and falls back to the protocol type otherwise, preserving behavior on other Qualcomm platforms.
+- `patches/0905-power-supply-hl7139-latch-faults-and-report-vbat.patch`
+  source: armada
+  upstream: local
+  notes: The HL7139 status registers are read-to-clear, so a userspace health poll or the threaded IRQ could consume a transient electrical/thermal fault before any other observer saw it, letting a later session start against a pump that just faulted. Status reads are now serialized under a mutex and electrical/thermal fault bits are latched in software; the latch clears only when VBUS is absent and pump presence is re-read (a cable cycle), and enable re-checks the latch. Also exposes the pump-local battery ADC as voltage_avg for pair-level coherence checks in the policy, and adds an i2c .shutdown callback so reboot/power-off gets a kernel-level pump-disable attempt.
+- `patches/0906-power-supply-hl7139-verify-suspend-shutdown.patch`
+  source: armada
+  upstream: local
+  notes: hl7139_suspend now propagates a failed pump-disable write and reads CTRL0 back to confirm CHG_EN is actually clear before allowing suspend to proceed; a pump that cannot be shut down aborts suspend (with userspace monitoring still alive) instead of leaving an uncontrolled charge path through sleep.
+- `patches/0907-power-supply-harden-pocket-evo-charge-contract.patch`
+  source: armada
+  upstream: local
+  notes: The kernel interface now enforces the tested direct-charge envelope instead of trusting userspace: PPS voltage requests must be 3.3-10.5 V on the 20 mV grid, input-current votes are capped at 3 A, USB SET replies are correlated with the exact outstanding property (a delayed current-limit ack can no longer complete a voltage request), and the battery reports Charging only for the paired two-pump state (see 0904).
+- `patches/0908-power-supply-scope-pocket-evo-direct-charge.patch`
+  source: armada
+  upstream: local
+  notes: Scopes the writable Qualcomm ICL/PPS interface to the Pocket EVO machine (of_machine_is_compatible "ayaneo,pocketevo"; -EOPNOTSUPP elsewhere) so other qcom_battmgr platforms are unaffected. In the HL7139 driver, the Android-derived register table is selected through Pocket EVO match data on the new ayaneo,pocket-evo-hl7139 compatible; the generic halomicro,hl7139 compatible binds the driver without the EVO init sequence and with pumps disabled at probe.
 - `patches/0001-pcie-update-sm8650-dtsi.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8650/patches/linux/0001-pcie-update-sm8650-dtsi.patch
   upstream: https://lore.kernel.org/r/20260611-wake-v2-35-2744251b1181@oss.qualcomm.com
@@ -512,7 +558,7 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/linux/dts/qcom/sm8750-konkr-pf-elite.dts
 - `dts/sm8750-konkr-pf-elite.dts.patch`
   source: armada
-  notes: Armada adapts the Elite touchscreen node to the full ROCKNIX Chipone fork shared with the SM8650 Pocket FIT; the driver is selected only by those two device-tree nodes.
+  notes: Armada adapts the Elite touchscreen node to the full ROCKNIX Chipone fork shared with the SM8650 Pocket FIT and keeps volume-up from waking the system; the driver is selected only by those two device-tree nodes.
 - `dts/cq8725s-ayn-common.dtsi`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0046-arm64-dts-qcom-Add-AYN-CQ8725S-Common.patch
   notes: Armada extracted this DTS from the cited ROCKNIX patch and then applied later ROCKNIX DTS updates, including the Odin 3 haptics nodes from ROCKNIX commit `81a31e3d0f`.
@@ -524,10 +570,10 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   notes: Armada enables DPU dithering after copying `dts/cq8725s-ayn-odin3.dts`.
 - `dts/cq8725s-ayn-common.dtsi.patch`
   source: armada
-  notes: Armada marks Odin 3's RSInput node as connected to the Qualcomm haptics device and supplies the device's 1024 range and 70-count axis deadzone.
+  notes: Armada keeps volume-up from waking the system, marks Odin 3's RSInput node as connected to the Qualcomm haptics device, and supplies the device's 1024 range and 70-count axis deadzone.
 - `dts/qcs8550-ayaneo-pocket-common.dtsi.patch`
   source: armada
-  notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocket-common.dtsi`.
+  notes: Armada keeps volume-up from waking the system and removes the SDHCI capability mask after copying `dts/qcs8550-ayaneo-pocket-common.dtsi`.
 - `dts/qcs8550-ayaneo-pocketace.dts.patch`
   source: armada
   notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketace.dts`.
@@ -539,19 +585,25 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pockets2k.dts`.
 - `dts/qcs8550-ayaneo-pocketds.dts.patch`
   source: armada
-  notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketds.dts`. It moves the lower panel onto the ST7703 driver contract: `vcc-supply` for the SGM3804 charge pump, and the former `enable-gpio` on TCA6408 GPIO0 re-modeled as a fixed regulator consumed as `iovcc-supply`. It also declares `vin-supply = <&tca6424_vcc>` on both expander-switched fixed regulators (`vdd_ts`, `panel1-iovcc`): the pca953x suspend callback disables its own VCC, and without the vin link the regulator core would cut the expander while the GT911 still holds VDDIO enabled, aborting async deep suspend mid Goodix screen-off write.
+  notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketds.dts`. It labels the lower GT911 input device as `bottom_touchscreen` and moves the lower panel onto the ST7703 driver contract: `vcc-supply` for the SGM3804 charge pump, and the former `enable-gpio` on TCA6408 GPIO0 re-modeled as a fixed regulator consumed as `iovcc-supply`. It also declares `vin-supply = <&tca6424_vcc>` on both expander-switched fixed regulators (`vdd_ts`, `panel1-iovcc`): the pca953x suspend callback disables its own VCC, and without the vin link the regulator core would cut the expander while the GT911 still holds VDDIO enabled, aborting async deep suspend mid Goodix screen-off write.
+- `dts/qcs8550-ayaneo-pocketevo.dts.patch`
+  source: armada
+  notes: Armada keeps the AYA Space, Menu, LC, and RC auxiliary keys from waking the system.
 - `dts/qcs8550-ayn-common.dtsi.patch`
   source: armada
-  notes: Armada removes the SDHCI capability mask and marks the shared RSInput node as connected to the PM8550B haptics device declared in the same common tree. This intentionally covers the AYN and Retroid products that inherit both nodes, including Pocket 6 and Nova.
+  notes: Armada keeps volume-up from waking the system, removes the SDHCI capability mask, and marks the shared RSInput node as connected to the PM8550B haptics device declared in the same common tree. This intentionally covers the AYN and Retroid products that inherit both nodes, including Pocket 6 and Nova.
+- `dts/qcs8550-ayn-odin2portal.dts.patch`
+  source: armada
+  notes: Adds the back buttons from the Odin 2 DTS into the Odin 2 Portal DTS
 - `dts/qcs8550-retroidpocket-rp6.dts.patch`
   source: armada
   notes: Armada switches Pocket 6 from ROCKNIX's Odin 2 fallback to audio firmware extracted from a Pocket 6 vendor image.
 - `dts/qcs8550-ayn-thor.dts.patch`
   source: armada
-  notes: Armada fixes the hall-sensor pinctrl and touch orientation after copying `dts/qcs8550-ayn-thor.dts`.
+  notes: Armada fixes the hall-sensor pinctrl, makes only the lid-open edge wake, corrects touch orientation, and enables DPU dithering on the top panel after copying `dts/qcs8550-ayn-thor.dts`.
 - `dts/sm8650-ayaneo-common.dtsi.patch`
   source: armada
-  notes: Armada applies this local patch after copying `dts/sm8650-ayaneo-common.dtsi`.
+  notes: Armada keeps volume-up from waking the system and wires the upstream SY7758 driver after copying `dts/sm8650-ayaneo-common.dtsi`.
 - `dts/sm8650-ayaneo-ps2.dts.patch`
   source: armada
   notes: Armada selects the accepted Pocket S2 WSA2 sound-card mapping after copying the ROCKNIX DTS.

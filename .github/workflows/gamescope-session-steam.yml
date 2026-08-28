@@ -1,0 +1,16 @@
+name: gamescope-session-steam
+on:
+  push:
+    branches: [main]
+    paths: ['gamescope-session-steam/**', 'oci/**', '.github/workflows/gamescope-session-steam.yml', '.github/workflows/_package-image.yml', 'toolchain.env', 'TERRA.env']
+  workflow_dispatch:
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+jobs:
+  build:
+    uses: ./.github/workflows/_package-image.yml
+    secrets: inherit
+    with:
+      package: gamescope-session-steam

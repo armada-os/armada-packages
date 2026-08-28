@@ -2,6 +2,10 @@
 # Splash launcher (KMS, fbdev fallback) for the boot and shutdown screens.
 set -u
 
+# On-device layout tuning (ARMADA_SPLASH_ARGS): /usr is sealed, /etc is not.
+# shellcheck source=/dev/null
+[[ -r /etc/armada/splash.conf ]] && source /etc/armada/splash.conf
+
 # Hide the VT cursor and clear buffered console text (e.g. a wall broadcast):
 # a later fbcon repaint must draw blank, not text over the sail.
 printf '\033[?25l\033[H\033[2J\033[3J' > /dev/tty0 2>/dev/null || true
@@ -42,7 +46,10 @@ backend=(--backend fbdev)
 argv0=armada-splash
 [[ -e /etc/initrd-release ]] && { argv0=@armada-splash; exec 2>>/run/armada/drawer.log; }
 
+read -r -a extra <<<"${ARMADA_SPLASH_ARGS:-}"
+
 exec -a "$argv0" /usr/libexec/armada/armada-splash "${backend[@]}" --rotate "$rot" --keep-vt \
     --image /usr/share/armada/splash/splash.asp \
     --status /run/armada/splash/status \
-    --font /usr/share/armada/splash/font.ttf
+    --font /usr/share/armada/splash/font.ttf \
+    "${extra[@]}"

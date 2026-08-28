@@ -29,7 +29,15 @@ Subject: [PATCH] arm64: dts: qcom: pocketds: ST7703 lower panel, expander rail s
  	};
  
  };
-@@ -219,13 +238,13 @@
+@@ -161,6 +180,7 @@
+ 
+ 		touchscreen-size-x = <768>;
+ 		touchscreen-size-y = <1024>;
++		label = "bottom_touchscreen";
+ 
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&ts2_reset>, <&ts2_irq>;
+@@ -219,13 +239,13 @@
  	status = "okay";
  
  	panel@0 {

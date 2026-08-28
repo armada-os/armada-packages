@@ -35,7 +35,7 @@ new file mode 100644
 index 000000000000..f84c84eb7948
 --- /dev/null
 +++ b/drivers/power/supply/hl7139_charger.c
-@@ -0,0 +1,476 @@
+@@ -0,0 +1,478 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Halo Microelectronics HL7139
@@ -95,8 +95,9 @@ index 000000000000..f84c84eb7948
 +#define HL7139_IIN_CP_LSB_UA	1100
 +#define HL7139_IIN_BP_LSB_UA	2200
 +#define HL7139_IBAT_LSB_UA	2200
-+#define HL7139_SAFE_VIN_MIN_UV	8000000
-+#define HL7139_SAFE_VIN_MAX_UV	10000000
++/* Startup/inrush window; active PPS requests are bounded separately. */
++#define HL7139_STARTUP_VIN_MIN_UV	8000000
++#define HL7139_STARTUP_VIN_MAX_UV	10500000
 +#define HL7139_SAFE_VBAT_MIN_UV	3500000
 +#define HL7139_SAFE_VBAT_MAX_UV	4450000
 +#define HL7139_SAFE_TDIE_MAX_DECI_C 900
@@ -222,7 +223,8 @@ index 000000000000..f84c84eb7948
 +					 HL7139_VIN_LSB_UV);
 +		if (vin < 0)
 +			return vin;
-+		if (vin < HL7139_SAFE_VIN_MIN_UV || vin > HL7139_SAFE_VIN_MAX_UV)
++		if (vin < HL7139_STARTUP_VIN_MIN_UV ||
++		    vin > HL7139_STARTUP_VIN_MAX_UV)
 +			return -ERANGE;
 +
 +		vbat = hl7139_read_adc(chip, HL7139_REG_ADC_VBAT,
@@ -488,7 +490,7 @@ index 000000000000..f84c84eb7948
 +}
 +
 +static const struct of_device_id hl7139_of_match[] = {
-+	{ .compatible = "halomicro,hl7139" },
++	{ .compatible = "ayaneo,pocket-evo-hl7139" },
 +	{ }
 +};
 +MODULE_DEVICE_TABLE(of, hl7139_of_match);

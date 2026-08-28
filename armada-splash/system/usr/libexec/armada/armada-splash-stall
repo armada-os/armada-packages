@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# Surface the running systemd job ("Waiting for <unit>...") when the splash
+# Surface the running systemd job ("Waiting for <unit>") when the splash
 # status stalls during boot; exits once the session owns the splash.
 set -u
 
@@ -26,7 +26,7 @@ while (( waited < MAXWAIT )); do
     if [[ "$m" == "$last_mtime" ]]; then still=$((still + 1)); else last_mtime="$m"; still=0; fi
     if (( still >= STALL )); then
         job="$(running_job)"
-        [[ -n "$job" ]] && /usr/libexec/armada/armada-splash-progress "Waiting for ${job}..."
+        [[ -n "$job" ]] && /usr/libexec/armada/armada-splash-progress "Waiting for ${job}"
         still=0
     fi
     sleep 1; waited=$((waited + 1))

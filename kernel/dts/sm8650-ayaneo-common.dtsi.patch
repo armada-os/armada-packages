@@ -25,6 +25,14 @@ Subject: [PATCH] arm64: dts: qcom: sm8650-ayaneo: wire the upstream SY7758 drive
 +
  	gpio-keys {
  		compatible = "gpio-keys";
+
+@@ -133,7 +149,6 @@
+ 			gpios = <&pm8550_gpios 6 GPIO_ACTIVE_LOW>;
+ 			debounce-interval = <15>;
+ 			linux,can-disable;
+-			wakeup-source;
+ 		};
+ 	};
  
 @@ -971,9 +987,7 @@
  		regulator-min-microvolt = <5000000>;

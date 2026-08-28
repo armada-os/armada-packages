@@ -1,9 +1,17 @@
 From: Armada <noreply@armada.local>
-Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientation
+Subject: [PATCH] arm64: dts: qcom: thor: hall wake, touch orientation, DPU dithering
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayn-thor.dts
-@@ -30,6 +30,8 @@
+@@ -5,6 +5,7 @@
+ 
+ /dts-v1/;
+ 
++#include <dt-bindings/input/gpio-keys.h>
+ #include "qcs8550-ayn-common.dtsi"
+ 
+ / {
+@@ -30,6 +31,8 @@
  
  	gpio-keys-lid {
  		compatible = "gpio-keys";
@@ -12,7 +20,25 @@ Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientati
  
  		hall-lid-sensor {
  			label = "Hall Lid Sensor";
-@@ -275,8 +277,6 @@
+@@ -37,6 +40,7 @@
+ 			linux,input-type = <EV_SW>;
+ 			linux,code = <SW_LID>;
+ 			linux,can-disable;
++			wakeup-event-action = <EV_ACT_DEASSERTED>;
+ 			wakeup-source;
+ 		};
+ 	};
+@@ -167,6 +171,9 @@
+ &display_panel {
+ 	compatible = "chipone,icna3520";
+ 
++	/* 8bpc DSI link; dither the DPU 10-bit downconvert to hide banding */
++	armada,dpu-8bpc-dither;
++
+ 	pinctrl-0 = <&dsi_s_rst_active>, <&dsi_s_te_active>;
+ 	pinctrl-1 = <&dsi_s_rst_suspend>, <&dsi_s_te_suspend>;
+ 	pinctrl-names = "default", "sleep";
+@@ -275,8 +282,6 @@
  
  		touchscreen-size-x = <1080>;
  		touchscreen-size-y = <1920>;
@@ -21,7 +47,7 @@ Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientati
  
  		label = "top_touchscreen";
  	};
-@@ -393,8 +393,6 @@
+@@ -393,8 +398,6 @@
  
  		touchscreen-size-x = <1080>;
  		touchscreen-size-y = <1240>;
@@ -30,10 +56,11 @@ Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientati
  
  		label = "bottom_touchscreen";
  
-@@ -452,6 +450,15 @@
+@@ -451,6 +454,15 @@
+ 		function = "gpio";
  		bias-pull-up;
  		output-disable;
- 	};
++	};
 +
 +	/* Open-drain hall output: with no pull-up the released (lid open)
 +	   level is undefined. */
@@ -42,7 +69,6 @@ Subject: [PATCH] arm64: dts: qcom: thor: fix the hall sensor and touch orientati
 +		function = "gpio";
 +		bias-pull-up;
 +		output-disable;
-+	};
+ 	};
  };
  
- &remoteproc_adsp {

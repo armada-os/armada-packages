@@ -5,7 +5,7 @@ set -euxo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 PACKAGE_DIR="${PWD}"
 
-source ./BASE.env
+source ../TERRA.env
 source ../toolchain.env
 
 rm -rf out
@@ -14,7 +14,7 @@ podman run --rm \
   --volume "${PACKAGE_DIR}:/work:Z" \
   --workdir /work \
   --platform linux/aarch64 \
-  --env COMMIT="${COMMIT}" \
+  --env TERRA_COMMIT="${TERRA_COMMIT}" \
   --env ARMADA_MARCH="${ARMADA_MARCH}" \
   "${BUILDER_IMAGE}" \
   bash -euxo pipefail -c '
@@ -22,7 +22,7 @@ podman run --rm \
 
     dnf install -y --nogpgcheck --repofrompath "terra,https://repos.fyralabs.com/terra${VERSION_ID}" terra-release
     dnf -y install --skip-unavailable \
-        anda
+        anda anda-srpm-macros
 
     cat >/etc/rpm/macros.armada <<EOF
 %_buildhost armada-builder
@@ -34,7 +34,7 @@ EOF
 
     cd /tmp/packages
 
-    git checkout ${COMMIT}
+    git checkout ${TERRA_COMMIT}
 
     PKG=anda/games/terra-gamescope
     SPEC="${PKG}/terra-gamescope.spec"
@@ -55,8 +55,12 @@ EOF
 
     {
       head -n "$((INSERT_LINE - 1))" "${SPEC}"
-      printf "Patch:         %s\n" "${PATCHES[@]}"
-      printf "\n"
+
+      if (( ${#PATCHES[@]} > 0 )); then
+        printf "Patch:         %s\n" "${PATCHES[@]}"
+        printf "\n"
+      fi
+
       tail -n "+${INSERT_LINE}" "${SPEC}"
     } >"${SPEC}.tmp"
 

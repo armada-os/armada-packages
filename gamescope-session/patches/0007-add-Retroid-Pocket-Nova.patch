@@ -1,0 +1,29 @@
+From c01b4bff0eba5a64455b610c212265c76e339b62 Mon Sep 17 00:00:00 2001
+From: Radical <radical@radical.fun>
+Date: Wed, 5 Aug 2026 05:31:28 +0200
+Subject: [PATCH 4/4] add Retroid Pocket Nova
+
+---
+ usr/share/gamescope-session-plus/device-quirks | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/usr/share/gamescope-session-plus/device-quirks b/usr/share/gamescope-session-plus/device-quirks
+index d5e6eb0..a121308 100644
+--- a/usr/share/gamescope-session-plus/device-quirks
++++ b/usr/share/gamescope-session-plus/device-quirks
+@@ -361,3 +361,12 @@ if [[ ":Retroid Pocket Mini:Retroid Pocket Mini V2:" =~ ":$SYS_ID:" ]]; then
+ 
+   export STEAM_DISPLAY_REFRESH_LIMITS=60
+ fi
++
++if [[ ":Retroid Pocket Nova:" =~ ":$SYS_ID:" ]]; then
++  OUTPUT_CONNECTOR='*,DSI-1'
++  CUSTOM_REFRESH_RATES=60,120
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
+-- 
+2.55.0
+

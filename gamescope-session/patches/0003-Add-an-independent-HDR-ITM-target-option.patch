@@ -13,12 +13,14 @@ diff --git a/usr/share/gamescope-session-plus/gamescope-session-plus b/usr/share
 index cc05043..11a8f9d 100755
 --- a/usr/share/gamescope-session-plus/gamescope-session-plus
 +++ b/usr/share/gamescope-session-plus/gamescope-session-plus
-@@ -237,6 +237,10 @@ if [ -z "$GAMESCOPECMD" ]; then
+@@ -237,6 +237,12 @@ if [ -z "$GAMESCOPECMD" ]; then
  		HDR_OPTIONS="$HDR_OPTIONS --hdr-itm-sdr-nits $GAMESCOPE_HDR_NITS --hdr-sdr-content-nits $GAMESCOPE_HDR_NITS"
  	fi
  
-+	if [ -n "${GAMESCOPE_HDR_ITM_TARGET_NITS:-}" ] && gamescope_has_option "--hdr-itm-target-nits"; then
-+		HDR_OPTIONS="$HDR_OPTIONS --hdr-itm-target-nits $GAMESCOPE_HDR_ITM_TARGET_NITS"
++	if [ ${ARMADA_HDR_NITS:-0} -ne 0 ]; then
++		HDR_OPTIONS="$HDR_OPTIONS --hdr-itm-target-nits $ARMADA_HDR_NITS"
++		export GAMESCOPE_INTERNAL_DEVICE_ID="${ARMADA_DEVICE_ID:-}"
++		export GAMESCOPE_EXPOSE_CLIENT_SAMPLEABLE_FORMATS=1
 +	fi
 +
  	GAMESCOPECMD="$(get_gamescope_binary) \

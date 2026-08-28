@@ -2,7 +2,7 @@ name: gamescope
 on:
   push:
     branches: [main]
-    paths: ['gamescope/**', 'oci/**', '.github/workflows/gamescope.yml', '.github/workflows/_package-image.yml', 'toolchain.env']
+    paths: ['gamescope/**', 'oci/**', '.github/workflows/gamescope.yml', '.github/workflows/_package-image.yml', 'toolchain.env', 'TERRA.env']
   workflow_dispatch:
     inputs:
       branch:

@@ -104,10 +104,18 @@ static int g_ttf_ok = 0;
 static float g_ttf_scale;
 static int g_ttf_ascent, g_ttf_descent, g_ttf_linegap;
 static int g_text_px = 32;
-static int g_text_px_req = 0; // --text-height (0 = auto from width)
-static int g_gap = -1;   // px between image and text; <0 = auto (half text height)
+static int g_text_px_req = 0; // --text-height (0 = auto from short axis)
+static int g_gap = -1;   // px between image and text; <0 = auto (1.6x text height)
 static int g_layout = 0; // 0 = centered group, 1 = logo centered + text bottom
+static int g_logo_dx = 0;     // --logo-offset-x, negative = left
 static uint32_t g_appid = 0x41524D41u; // STEAM_GAME appid; match GAMESCOPE_FALLBACK_APPID
+
+// Layout is authored against a 1080px short axis and scales from it.
+static int auto_text_px(int ref) { return ref * 55 / 1080; }
+// 377 = the asset's own height, i.e. the logo at design scale.
+static int auto_logo_px(int ref) { return ref * 377 / 1080; }
+// Box to box, not ink to ink: the logo and the text line both carry padding.
+static int auto_gap_px(int ref) { return ref * 50 / 1080; }
 
 static inline void blend_shadow(int x, int y, uint32_t color, int cov) {
     if (cov <= 0 || x < 0 || x >= SW || y < 0 || y >= SH) return;
@@ -185,19 +193,72 @@ static void tt_draw_centered(const char *s, int baseline, uint32_t color) {
     tt_blit(cps, n, x, baseline, color, 255, 255);                  // text
 }
 
+#define MAX_LINES 8
+
+static char g_lines[MAX_LINES][256];
+static uint32_t g_linecol[MAX_LINES];
+
+static int measure(const char *s, int len) {
+    char tmp[256];
+    if (len > (int)sizeof tmp - 1) len = (int)sizeof tmp - 1;
+    memcpy(tmp, s, len); tmp[len] = 0;
+    uint32_t cps[256];
+    int n = utf8_cps(tmp, cps, 256);
+    return g_ttf_ok ? tt_text_w(cps, n) : n * 8 * text_scale;
+}
+
+static int emit(int n, const char *s, int len, uint32_t col) {
+    if (n >= MAX_LINES) return n;
+    snprintf(g_lines[n], sizeof g_lines[n], "%.*s", len, s);
+    g_linecol[n] = col;
+    return n + 1;
+}
+
+// Unwrapped, an overlong line draws from a clamped x=0 and runs off both edges.
+static int wrap(char *p, uint32_t col, int maxw, int n) {
+    while (*p && n < MAX_LINES) {
+        int len = (int)strlen(p);
+        if (measure(p, len) <= maxw) return emit(n, p, len, col);
+        int brk = -1;
+        for (int i = 0; p[i]; i++)
+            if (p[i] == ' ') {
+                if (measure(p, i) <= maxw) brk = i;
+                else break;
+            }
+        if (brk < 0) {
+            // No break point fits: split mid-word, on a codepoint boundary.
+            int i = 1;
+            while (p[i] && measure(p, i + 1) <= maxw) i++;
+            while (i > 1 && ((unsigned char)p[i] & 0xC0) == 0x80) i--;
+            n = emit(n, p, i, col);
+            p += i;
+        } else {
+            n = emit(n, p, brk, col);
+            p += brk + 1;          // the break space is not drawn
+        }
+    }
+    return n;
+}
+
 static void compose(const char *status) {
     for (int i = 0; i < SW * SH; i++) shadow[i] = bg;
 
     char buf[512];
     snprintf(buf, sizeof buf, "%s", status ? status : "");
-    char *lines[8]; int n = 0;
-    for (char *p = buf; *p && n < 8; ) {
-        lines[n++] = p;
+    // SW is post-rotation width; full width reads as a paragraph.
+    int maxw = SW / 2;
+    int n = 0;
+    for (char *p = buf; *p && n < MAX_LINES; ) {
         char *nl = strchr(p, '\n');
+        if (nl) *nl = 0;
+        if (*p) {
+            uint32_t col = 0xFFFFFFFF;
+            if (*p == '!') { col = 0xFFFF4040; p++; }
+            n = wrap(p, col, maxw, n);
+        }
         if (!nl) break;
-        *nl = 0; p = nl + 1;
+        p = nl + 1;
     }
-    if (n && lines[n - 1][0] == 0) n--;
 
     int line_h, ascent_px = 0;
     if (g_ttf_ok) {
@@ -207,7 +268,9 @@ static void compose(const char *status) {
         line_h = 8 * text_scale + text_scale;
     }
     int text_block_h = n * line_h;
-    int logo_x = (SW - img_w) / 2, logo_y, text_top;
+    int ref = SW < SH ? SW : SH;
+    int logo_x = (SW - img_w) / 2 + g_logo_dx;
+    int logo_y, text_top;
 
     if (g_layout == 1) {
         // split layout: --gap is the bottom margin.
@@ -215,10 +278,11 @@ static void compose(const char *status) {
         int margin = g_gap >= 0 ? g_gap : g_text_px;
         text_top = SH - margin - text_block_h;
     } else {
-        // Logo position ignores the text so the image never jumps as lines change.
-        int gap = img_h ? (g_gap >= 0 ? g_gap : (g_ttf_ok ? 7 * g_text_px / 4 : 14 * text_scale)) : 0;
-        logo_y = (SH - img_h) / 2;
-        text_top = logo_y + img_h + gap;
+        int gap = img_h ? (g_gap >= 0 ? g_gap : (g_ttf_ok ? auto_gap_px(ref) : 13 * text_scale)) : 0;
+        // Reserve one line always: sizing to the live count jumps the logo.
+        int group_h = (img_h ? img_h + gap : 0) + line_h;
+        logo_y = (SH - group_h) / 2;
+        text_top = logo_y + (img_h ? img_h + gap : 0);
     }
     if (logo_y < 0) logo_y = 0;
     if (text_top < 0) text_top = 0;
@@ -230,11 +294,8 @@ static void compose(const char *status) {
 
     int ty = text_top;
     for (int i = 0; i < n; i++) {
-        const char *ln = lines[i];
-        uint32_t col = 0xFFFFFFFF;
-        if (*ln == '!') { col = 0xFFFF4040; ln++; }
-        if (g_ttf_ok) tt_draw_centered(ln, ty + ascent_px, col);
-        else draw_text_centered(ln, ty, text_scale, col);
+        if (g_ttf_ok) tt_draw_centered(g_lines[i], ty + ascent_px, g_linecol[i]);
+        else draw_text_centered(g_lines[i], ty, text_scale, g_linecol[i]);
         ty += line_h;
     }
 }
@@ -653,10 +714,10 @@ static void x11_resize(int w, int h) {
     // Same short-axis sizing as startup, or text changes size on rotation.
     int ref = SW < SH ? SW : SH;
     text_scale = ref / 540; if (text_scale < 2) text_scale = 2;
-    g_text_px = g_text_px_req > 0 ? g_text_px_req : ref / 20;
+    g_text_px = g_text_px_req > 0 ? g_text_px_req : auto_text_px(ref);
     if (g_text_px < 14) g_text_px = 14;
     if (g_ttf_ok) g_ttf_scale = stbtt_ScaleForPixelHeight(&g_ttf, (float)g_text_px);
-    scale_logo(g_logo_px_req > 0 ? g_logo_px_req : ref / 4);
+    scale_logo(g_logo_px_req > 0 ? g_logo_px_req : auto_logo_px(ref));
     if (x_img) { x_img->data = NULL; XDestroyImage(x_img); }   // don't free shadow (aliased)
     int scr = DefaultScreen(x_dpy);
     x_img = XCreateImage(x_dpy, DefaultVisual(x_dpy, scr), DefaultDepth(x_dpy, scr),
@@ -748,16 +809,18 @@ int main(int argc, char **argv) {
     // Short-axis sizing keeps text height equal in portrait and landscape modes.
     int text_ref = SW < SH ? SW : SH;
     text_scale = text_ref / 540; if (text_scale < 2) text_scale = 2;
-    g_text_px = g_text_px_req > 0 ? g_text_px_req : text_ref / 20;
+    g_text_px = g_text_px_req > 0 ? g_text_px_req : auto_text_px(text_ref);
     if (g_text_px < 14) g_text_px = 14;
     g_gap = atoi(arg(argc, argv, "--gap", "-1"));
+    for (int i = 1; i < argc - 1; i++)
+        if (!strcmp(argv[i], "--logo-offset-x")) { g_logo_dx = atoi(argv[i + 1]); }
     if (!strcmp(arg(argc, argv, "--layout", "group"), "split")) g_layout = 1;
     g_appid = (uint32_t)strtoul(arg(argc, argv, "--appid", "0x41524d41"), NULL, 0);
     load_font(arg(argc, argv, "--font", "/usr/share/armada/splash/font.ttf"), g_text_px);
     load_image(image);
     img_src = img; img_src_w = img_w; img_src_h = img_h;
     g_logo_px_req = atoi(arg(argc, argv, "--logo-height", "0"));
-    scale_logo(g_logo_px_req > 0 ? g_logo_px_req : text_ref / 4);
+    scale_logo(g_logo_px_req > 0 ? g_logo_px_req : auto_logo_px(text_ref));
 
     read_status(status, g_cur, sizeof g_cur);
     compose(g_cur);

@@ -72,10 +72,10 @@ index 5a7a411beb3cac0c71813053b193c6574c5334e5..1cb18a7442cce09c0dee65989dd2a70a
 +++ b/tests/meson.build
 @@ -9,7 +9,7 @@ unittest_src += srcdir / 'edid.cpp'
  
- test_convar = executable(
- 	'test_convar',
--	unittest_src + ['test_convar.cpp', 'test_display_lookup.cpp', 'test_edid.cpp'],
-+	unittest_src + ['test_convar.cpp', 'test_display_lookup.cpp', 'test_drm_composition.cpp', 'test_edid.cpp'],
+ gamescope_tests = executable(
+ 	'gamescope_tests',
+-	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_display_lookup.cpp', 'test_edid.cpp'],
++	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_display_lookup.cpp', 'test_drm_composition.cpp', 'test_edid.cpp'],
  	include_directories: [srcdir, sol2_include],
  	dependencies: [catch2_dep, luajit_dep, cap_dep, displayinfo_dep, drm_dep, glm_dep, wlroots_dep],
  	cpp_args: gamescope_cpp_args,

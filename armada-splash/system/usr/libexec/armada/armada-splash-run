@@ -3,6 +3,9 @@
 # progress, and surface launch failures.
 set -u
 
+# shellcheck source=/dev/null
+[[ -r /etc/armada/splash.conf ]] && source /etc/armada/splash.conf
+
 MODE="${ARMADA_SPLASH_MODE:-x11}"              # x11 | off
 DIR="${ARMADA_SPLASH_DIR:-/usr/share/armada/splash}"
 # Unset = X display size; a forced portrait size gets fit-scaled/pillarboxed.
@@ -27,7 +30,7 @@ faillog="$logdir/last-steam-failure.log"
 say() { [[ -n "$*" ]] && ARMADA_SPLASH_STATUS="$STATUS" "$PROGRESS" "$@"; return 0; }
 cef_up() { (exec 3<>"/dev/tcp/127.0.0.1/${CEF_PORT}") 2>/dev/null; }
 
-say "Starting Steam..."
+say "Starting Steam"
 
 # Clear the retained early-boot frame so a later DRM release cannot re-scan
 # it as a ghost; invisible now, gamescope owns scanout.
@@ -40,6 +43,8 @@ splash_args=()
 if [[ "$MODE" == "x11" && -n "${DISPLAY:-}" && -x "$SPLASH_BIN" ]]; then
     splash_args=(--backend x11 --image "$ASSET" --status "$STATUS" --font "$FONT")
     [[ -n "$W" && -n "$H" ]] && splash_args+=(--width "$W" --height "$H")
+    read -r -a extra <<<"${ARMADA_SPLASH_ARGS:-}"
+    splash_args+=("${extra[@]}")
     "$SPLASH_BIN" "${splash_args[@]}" &
     splash_pid=$!
 fi
@@ -72,8 +77,9 @@ forward_updater() {
         *"Verifying installation"*) (( saw_update )) || return ;;
     esac
     case "$raw" in
-        "Installing bootstrap"*) say "Installing Steam..." ;;
-        *) say "$(sed -E 's/^\[-+\] *//' <<<"$raw")" ;;
+        "Installing bootstrap"*) say "Installing Steam" ;;
+        # Valve's wording; drop its trailing ellipsis to match the rest.
+        *) say "$(sed -E 's/^\[-+\] *//; s/\.\.\.$//' <<<"$raw")" ;;
     esac
 }
 
@@ -86,7 +92,7 @@ while kill -0 "$steam_pid" 2>/dev/null; do
     fi
     forward_updater
     if (( waited == SLOW_AFTER )) && [[ -z "$fwd_last" ]]; then
-        say "Still starting. First boot installs Steam and can take a few minutes..."
+        say "Still starting. First boot installs Steam and can take a few minutes."
     fi
     sleep 1; (( waited++ ))
 done
@@ -96,7 +102,7 @@ wait "$steam_pid"; code=$?
 # 42 = Steam's relaunch request (self-update applied), not a failure; the
 # session restarts Steam and the splash exits on displacement.
 if (( code == 42 )); then
-    say "Restarting Steam..."
+    say "Restarting Steam"
     exit 42
 fi
 

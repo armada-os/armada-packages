@@ -221,10 +221,11 @@ diff --git a/tests/meson.build b/tests/meson.build
 index 1cb18a7442cce09c0dee65989dd2a70a09795346..181cf0fbbacb360051c94e2d7e5486c26a5fbd80 100644
 --- a/tests/meson.build
 +++ b/tests/meson.build
-@@ -15,3 +15,11 @@ test_convar = executable(
- 	cpp_args: gamescope_cpp_args,
+@@ -15,4 +15,12 @@ gamescope_tests = executable(
+	cpp_args: gamescope_cpp_args,
  )
- test('convar', test_convar)
+ test('convar', gamescope_tests, args: ['[convar]'])
+ test('process', gamescope_tests, args: ['[process]'])
 +
 +test_wsi_hdr_surface_formats = executable(
 +	'test_wsi_hdr_surface_formats',
@@ -232,7 +233,7 @@ index 1cb18a7442cce09c0dee65989dd2a70a09795346..181cf0fbbacb360051c94e2d7e5486c2
 +	include_directories: ['../layer'],
 +	dependencies: [catch2_dep, vulkan_dep],
 +)
-+test('wsi-hdr-surface-formats', test_wsi_hdr_surface_formats)
++test('wsi-hdr-surface-formats', gamescope_tests)
 diff --git a/tests/test_wsi_hdr_surface_formats.cpp b/tests/test_wsi_hdr_surface_formats.cpp
 new file mode 100644
 index 0000000000000000000000000000000000000000..e21b64a2ec7810764a862280db3d82a456529c9c

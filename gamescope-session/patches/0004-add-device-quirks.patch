@@ -1,0 +1,161 @@
+From 2e3dd1ad5f50e2efc5a554bd5fda0e27c2d131a0 Mon Sep 17 00:00:00 2001
+From: Radical <radical@radical.fun>
+Date: Mon, 3 Aug 2026 06:30:47 +0200
+Subject: [PATCH 1/4] add device quirks
+
+this commit contains device quirks for:
+AYANEO Pocket ACE
+AYANEO Pocket DMG
+AYANEO Pocket DS
+AYANEO Pocket EVO
+AYANEO Pocket S2
+AYANEO Pocket S 2K
+AYN Odin 2
+AYN Odin 2 Mini
+AYN Odin 2 Portal
+AYN Odin 3
+AYN Thor
+KONKR Pocket FIT
+Retroid Pocket 5
+Retroid Pocket Flip2
+Retroid Pocket 6
+Retroid Pocket Mini
+Retroid Pocket Mini V2
+---
+ .../gamescope-session-plus/device-quirks      | 116 +++++++++++++++++-
+ 1 file changed, 115 insertions(+), 1 deletion(-)
+
+diff --git a/usr/share/gamescope-session-plus/device-quirks b/usr/share/gamescope-session-plus/device-quirks
+index b666a69..bb4a6b7 100644
+--- a/usr/share/gamescope-session-plus/device-quirks
++++ b/usr/share/gamescope-session-plus/device-quirks
+@@ -1,7 +1,7 @@
+ # This file will be sourced by gamescope-session script if not
+ # overridden in ~/.config/environment.d
+ 
+-SYS_ID="$(cat /sys/devices/virtual/dmi/id/product_name)"
++SYS_ID="$(cat /sys/devices/virtual/dmi/id/product_name || tr -d '\0' </sys/firmware/devicetree/base/model)"
+ CPU_VENDOR="$(lscpu | grep "Vendor ID" | cut -d : -f 2 | xargs)"
+ 
+ # OXP 60Hz Devices
+@@ -238,3 +238,117 @@ if [ -f "$xg_mobile_file_path" ]; then
+     fi
+   fi
+ fi
++
++if [[ ":AYANEO Pocket ACE:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=60
++  OUTPUT_CONNECTOR='*,DSI-1'
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60
++fi
++
++if [[ ":AYANEO Pocket DMG:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=left
++  CUSTOM_REFRESH_RATES=60
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=65x75
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60
++fi
++
++if [[ ":AYANEO Pocket DS:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=left
++  CUSTOM_REFRESH_RATES=60,120
++  # Prefer top screen
++  OUTPUT_CONNECTOR='*,DSI-1,DSI-2'
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
++if [[ ":AYANEO Pocket EVO:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=left
++  CUSTOM_REFRESH_RATES=60,120
++  OUTPUT_CONNECTOR='*,DSI-1'
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
++if [[ ":AYANEO Pocket S2:AYANEO Pocket S 2K:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=60
++  OUTPUT_CONNECTOR='*,DSI-1'
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60
++fi
++
++if [[ ":AYN Odin 2:AYN Odin 2 Mini:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=60
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60
++fi
++
++if [[ ":AYN Odin 2 Portal:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=left
++  CUSTOM_REFRESH_RATES=60,120
++  OUTPUT_CONNECTOR='*,DSI-1'
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
++if [[ ":AYN Odin 3:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=60,120
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
++if [[ ":AYN Thor:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=60,120
++  # Prefer top screen
++  OUTPUT_CONNECTOR='*,DSI-2,DSI-1'
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
++if [[ ":KONKR Pocket FIT:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=144
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=144
++fi
++
++if [[ ":Retroid Pocket 5:Retroid Pocket Flip2:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=left
++  CUSTOM_REFRESH_RATES=60
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60
++fi
++
++if [[ ":Retroid Pocket 6:Retroid Pocket 6 TOP-DPAD:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=left
++  CUSTOM_REFRESH_RATES=60,120
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=177x100
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60,120
++fi
++
++if [[ ":Retroid Pocket Mini:Retroid Pocket Mini V2:" =~ ":$SYS_ID:" ]]; then
++  ORIENTATION=right
++  CUSTOM_REFRESH_RATES=60
++  OUTPUT_CONNECTOR='*,DSI-1'
++  FAKE_OUTPUT_MM=65x75
++
++  export STEAM_DISPLAY_REFRESH_LIMITS=60
++fi
+-- 
+2.55.0
+

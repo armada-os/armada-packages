@@ -1,0 +1,127 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: harden Pocket EVO charge contract
+
+Make the kernel interface describe and enforce the tested direct-charge
+envelope instead of relying on userspace convention. Limit PPS requests to
+3.3-10.5 V in 20 mV steps and cap the Qualcomm input-current vote at 3 A.
+
+Correlate USB SET replies with the exact outstanding property so a delayed
+current-limit acknowledgement cannot complete a voltage request. Report
+Charging only when both HL7139 pumps are online; a single enabled pump is an
+asymmetric state.
+
+---
+ drivers/power/supply/qcom_battmgr.c | 46 ++++++++++++++++++----------
+ 1 file changed, 36 insertions(+), 10 deletions(-)
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -327,6 +327,8 @@ struct qcom_battmgr {
+ 
+ 	int error;
+ 	struct completion ack;
++	unsigned int pending_usb_set_property;
++	bool pending_usb_set;
+ 
+ 	bool service_up;
+ 
+@@ -539,8 +541,8 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 		 * battery and the Qualcomm buck is quiesced to 13 mA. The
+ 		 * battery-manager firmware only tracks its own buck, so it
+ 		 * reports DISCHARGING even while the pumps push current into
+-		 * the cell. If either pump supply is online, the battery is
+-		 * charging by definition.
++		 * the cell. Only a paired pump state proves direct charging;
++		 * a lone enabled pump is an asymmetric fault, not Charging.
+ 		 */
+ 		if (battmgr->status.status != POWER_SUPPLY_STATUS_CHARGING) {
+ 			static const char * const pump_names[] = {
+@@ -548,21 +550,24 @@ static int qcom_battmgr_bat_get_property(struct power_supply *psy,
+ 			};
+ 			struct power_supply *pump;
+ 			union power_supply_propval pval;
+-			int i;
++			int i, pumps_online = 0;
+ 
+ 			for (i = 0; i < ARRAY_SIZE(pump_names); i++) {
+ 				pump = power_supply_get_by_name(pump_names[i]);
+ 				if (!pump)
+-					continue;
+-				if (!power_supply_get_property(pump,
+-							      POWER_SUPPLY_PROP_ONLINE,
+-							      &pval) &&
+-				    pval.intval) {
++					break;
++				if (power_supply_get_property(pump,
++							     POWER_SUPPLY_PROP_ONLINE,
++							     &pval) || !pval.intval) {
+ 					power_supply_put(pump);
+-					val->intval = POWER_SUPPLY_STATUS_CHARGING;
+-					return 0;
++					break;
+ 				}
+ 				power_supply_put(pump);
++				pumps_online++;
++			}
++			if (pumps_online == ARRAY_SIZE(pump_names)) {
++				val->intval = POWER_SUPPLY_STATUS_CHARGING;
++				return 0;
+ 			}
+ 		}
+ 		val->intval = battmgr->status.status;
+@@ -1106,6 +1111,11 @@ static int qcom_battmgr_usb_get_property(struct power_supply *psy,
+ 	return 0;
+ }
+ 
++#define QCOM_BATTMGR_USB_ICL_MAX_UA	3000000
++#define QCOM_BATTMGR_USB_PPS_MIN_UV	3300000
++#define QCOM_BATTMGR_USB_PPS_MAX_UV	10500000
++#define QCOM_BATTMGR_USB_PPS_STEP_UV	20000
++
+ static int qcom_battmgr_usb_set_property(struct power_supply *psy,
+ 					 enum power_supply_property psp,
+ 					 const union power_supply_propval *pval)
+@@ -1121,9 +1131,15 @@ static int qcom_battmgr_usb_set_property(struct power_supply *psy,
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		if (pval->intval > QCOM_BATTMGR_USB_ICL_MAX_UA)
++			return -ERANGE;
+ 		property = USB_INPUT_CURR_LIMIT;
+ 		break;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
++		if (pval->intval < QCOM_BATTMGR_USB_PPS_MIN_UV ||
++		    pval->intval > QCOM_BATTMGR_USB_PPS_MAX_UV ||
++		    pval->intval % QCOM_BATTMGR_USB_PPS_STEP_UV)
++			return -ERANGE;
+ 		property = USB_VOLT_NOW;
+ 		break;
+ 	default:
+@@ -1143,10 +1159,13 @@ static int qcom_battmgr_usb_set_property(struct power_supply *psy,
+ 		}
+ 	}
+ 
++	WRITE_ONCE(battmgr->pending_usb_set_property, property);
++	smp_store_release(&battmgr->pending_usb_set, true);
+ 	ret = qcom_battmgr_request_property(battmgr,
+ 					    BATTMGR_USB_PROPERTY_SET,
+ 					    property,
+ 					    pval->intval);
++	WRITE_ONCE(battmgr->pending_usb_set, false);
+ 	if (!ret && psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT)
+ 		battmgr->usb.current_limit = pval->intval;
+ 
+@@ -1658,6 +1677,13 @@ static void qcom_battmgr_sm8350_callback(struct qcom_battmgr *battmgr,
+ 			battmgr->error = -ENODATA;
+ 			return;
+ 		}
++		if (!smp_load_acquire(&battmgr->pending_usb_set) ||
++		    property != READ_ONCE(battmgr->pending_usb_set_property)) {
++			dev_warn(battmgr->dev,
++				 "unexpected USB set response for property %#x\n",
++				 property);
++			return;
++		}
+ 		val = le32_to_cpu(resp->intval.result);
+ 		if (val) {
+ 			dev_warn(battmgr->dev,

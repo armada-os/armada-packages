@@ -27,6 +27,7 @@
 0056-backlight-aw99706-enable-hwen-before-chip-id-read.patch
 0057-backlight-aw99706-konkr-cfg7.patch
 0062-backlight-aw99706-honor-blank-power-state.patch
+0065-backlight-aw99706-use-dt-binding-property-names.patch
 
 # ============== Touchscreen ==============
 0015-touchscreen-edt-ft5x06-allow-to-override-input-name.patch
@@ -36,6 +37,8 @@
 0053a-input-hynitron-port-to-gpiod.patch
 0053b-input-hynitron-restore-gpio-init-order.patch
 0054-input-goodix-override-resolution-from-dt.patch
+0054a-dt-bindings-input-goodix-document-input-device-label.patch
+0054b-input-goodix-allow-overriding-input-device-name.patch
 0029-Input-edt-ft5x06-add-no_regmap_bulk_read-option.patch
 0059_AYN-Odin2-Mini--hynitron--cstxxx.patch
 0060-input-touchscreen-add-synaptics-dsx-kconfig.patch
@@ -58,8 +61,11 @@
 1001-haptics-driver-support-periodic-sine-and-fixes.patch
 1002-input-rsinput-sm8750-ff.patch
 1003-input-haptics-fix-rumble-bridge-atomic-sleep.patch
+1005-input-rsinput-quiesce-the-mcu-across-system-sleep.patch
+1006-tty-serial-qcom-geni-mask-non-console-irq-on-suspend.patch
 1004-input-haptics-stop-zero-amplitude-immediately.patch
 1300-input-rsinput-axis-deadzone.patch
+0515-input-rsinput-reassemble-uart-frames-instead-of-dropping-them.patch
 
 # ============== Audio ==============
 0059-ASoC-aw88395-lib-skip-monitor-sections-in-V1-ACF-parse.patch
@@ -83,10 +89,11 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0510-soc-qcom-ice-unwind-clocks-on-resume-failure.patch
 0511-scsi-ufs-qcom-reenable-irq-on-host-reset-failure.patch
 0512-PCI-qcom-skip-L23-ready-poll-on-SM8550.patch
-1031-revert-clk-regmap-phy-mux-rate-based-rework.patch
+0513-PCI-qcom-honour-an-opp-suspend-opp-as-the-non-s2ram-memory-floor.patch
 
 # ============== SM8550 DTSI prerequisites ==============
 0001-pcie-update-sm8550-dtsi.patch
+0520-arm64-dts-qcom-sm8550-add-a-pcie-suspend-opp.patch
 0120-20250728_konradybcio_gpu_cc_power_requirements_reality_check.patch
 0121-pmdomain-qcom-rpmhpd-presync-floor-gmu-rails.patch
 0122-interconnect__qcom__sm8550__Enable_QoS_configuration.patch
@@ -96,13 +103,17 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0500-ROCKNIX-set-boot-fanspeed.patch
 0501-ROCKNIX-fix-wifi-and-bt-mac.patch
 0503-ROCKNIX-battery-name.patch
-0900-power-supply-qcom-battmgr-log-usb-adapter-type.patch
 
 # ============== Charging ==============
 0901-power-supply-qcom-battmgr-set-usb-input-current-limit.patch
+0902-power-supply-qcom-battmgr-report-pd-pps-adapter.patch
 0063-power-supply-add-HL7139-charge-pump.patch
 0903-power-supply-hl7139-suspend-safety.patch
 0904-power-supply-qcom-battmgr-charging-status.patch
+0905-power-supply-hl7139-latch-faults-and-report-vbat.patch
+0906-power-supply-hl7139-verify-suspend-shutdown.patch
+0907-power-supply-harden-pocket-evo-charge-contract.patch
+0908-power-supply-scope-pocket-evo-direct-charge.patch
 
 # ============== SM8650 (AYANEO Pocket S2, KONKR Pocket FIT) ==============
 0001-pcie-update-sm8650-dtsi.patch

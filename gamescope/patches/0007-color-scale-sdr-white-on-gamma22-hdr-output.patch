@@ -6,12 +6,22 @@ outputs by scaling SDR input against the panel peak, so the SDR content
 brightness control is not a no-op there. Ordinary SDR and external PQ
 output keep their existing paths.
 
+A Gamma 2.2 HDR output stays enabled while gamescope composites nothing but
+SDR, so gate the scale on the focused app actually requesting HDR. Without
+that gate every SDR frame is pinned at the SDR-on-HDR white level, which
+costs the panel most of its code range and shows up as reduced maximum
+brightness and washed out colour at low backlight.
+
+The gate keys on the current base layer, not on every composited layer. An
+outgoing HDR base is still painted as HELD_COMMIT_FADE after the new SDR base
+takes over, so SDR layers encode unscaled for the fade duration.
+
 diff --git a/src/HDRGamma22.h b/src/HDRGamma22.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..8afd1238dd40868cc9921f6e916451ce13a4246f
+index 0000000..65f4150
 --- /dev/null
 +++ b/src/HDRGamma22.h
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,50 @@
 +#pragma once
 +
 +#include "color_helpers.h"
@@ -23,23 +33,31 @@ index 0000000000000000000000000000000000000000..8afd1238dd40868cc9921f6e916451ce
 +    constexpr bool ColorMgmtLutsAreCurrent(
 +        bool bColorMgmtConfigCurrent,
 +        bool bLutsInitialized,
-+        bool bCachedTraditionalHDROutput,
-+        bool bTraditionalHDROutput )
++        bool bCachedScaleSDRWhite,
++        bool bScaleSDRWhite )
 +    {
 +        return bColorMgmtConfigCurrent && bLutsInitialized &&
-+            bCachedTraditionalHDROutput == bTraditionalHDROutput;
++            bCachedScaleSDRWhite == bScaleSDRWhite;
 +    }
 +
-+    // A traditional-HDR panel is driven in its native Gamma 2.2 encoding, so
-+    // SDR white must be scaled into the panel's HDR luminance range explicitly.
-+    // PQ outputs already encode flSDROnHDRBrightness in the transfer function.
++    // The output stays in HDR with SDR content, so key on the focused app. An
++    // outgoing HDR base still composites through the fade.
++    constexpr bool ShouldScaleGamma22SDRWhite(
++        bool bOutputHDREnabled,
++        bool bAppWantsHDR,
++        bool bOutputIsHDRG22 )
++    {
++        return bOutputHDREnabled && bAppWantsHDR && bOutputIsHDRG22;
++    }
++
++    // PQ encodes SDR white in its transfer function; Gamma 2.2 does not.
 +    constexpr float Gamma22HdrSDRInputScale(
-+        bool bTraditionalHDROutput,
++        bool bScaleSDRWhite,
 +        EOTF eOutputEncodingEOTF,
 +        float flSDRWhiteNits,
 +        float flPanelPeakNits )
 +    {
-+        if ( !bTraditionalHDROutput || eOutputEncodingEOTF != EOTF_Gamma22 ||
++        if ( !bScaleSDRWhite || eOutputEncodingEOTF != EOTF_Gamma22 ||
 +             !( flSDRWhiteNits >= 1.0f ) ||
 +             !( flSDRWhiteNits <= std::numeric_limits<float>::max() ) ||
 +             !( flPanelPeakNits >= 1.0f ) ||
@@ -55,7 +73,7 @@ index 0000000000000000000000000000000000000000..8afd1238dd40868cc9921f6e916451ce
 +    }
 +}
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index c1da072f986b1784f443d6e930f065e779acbb6f..8807059fa3c1dff8e15b93afb729f6716af4fab1 100644
+index ca543e8..e386123 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
 @@ -30,6 +30,7 @@
@@ -66,7 +84,15 @@ index c1da072f986b1784f443d6e930f065e779acbb6f..8807059fa3c1dff8e15b93afb729f671
  #include "gamescope_shared.h"
  #include "xwayland_ctx.hpp"
  #include <X11/X.h>
-@@ -324,7 +325,10 @@ static const gamescope_color_mgmt_t k_ScreenshotColorMgmtHDR =
+@@ -160,6 +161,7 @@ static lut3d_t g_tmpLut3d;
+ extern int g_nDynamicRefreshHz;
+ 
+ bool g_bForceHDRSupportDebug = false;
++extern bool g_bAppWantsHDRCached;
+ extern float g_flInternalDisplayBrightnessNits;
+ extern float g_flHDRItmSdrNits;
+ extern float g_flHDRItmTargetNits;
+@@ -324,7 +326,10 @@ static const gamescope_color_mgmt_t k_ScreenshotColorMgmtHDR =
  // sudo cpupower frequency-set --governor performance
  
  static void
@@ -74,42 +100,40 @@ index c1da072f986b1784f443d6e930f065e779acbb6f..8807059fa3c1dff8e15b93afb729f671
 +create_color_mgmt_luts(
 +	const gamescope_color_mgmt_t& newColorMgmt,
 +	gamescope_color_mgmt_luts outColorMgmtLuts[ EOTF_Count ],
-+	bool bTraditionalHDROutput )
++	bool bScaleSDRWhite )
  {
  	const displaycolorimetry_t& displayColorimetry = newColorMgmt.displayColorimetry;
  	const displaycolorimetry_t& outputEncodingColorimetry = newColorMgmt.outputEncodingColorimetry;
-@@ -360,7 +364,14 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
- 				flGain = newColorMgmt.flSDRInputGain;
+@@ -361,6 +366,11 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
  				if ( newColorMgmt.outputEncodingEOTF == EOTF_Gamma22 )
  				{
--					// G22 -> G22. Does not matter what the g22 mult is
-+					// G22 -> G22. On a traditional-HDR panel the native
-+					// encoding still needs SDR white scaled below panel peak;
-+					// otherwise Steam's SDR-on-HDR brightness atom is a no-op.
+ 					// G22 -> G22. Does not matter what the g22 mult is
 +					flGain *= gamescope::Gamma22HdrSDRInputScale(
-+						bTraditionalHDROutput,
++						bScaleSDRWhite,
 +						newColorMgmt.outputEncodingEOTF,
 +						newColorMgmt.flSDROnHDRBrightness,
 +						newColorMgmt.flInternalDisplayBrightness );
  					tonemapping.g22_luminance = 1.f;
  					// xwm_log.infof("G22 -> G22");
  				}
-@@ -465,9 +476,14 @@ int g_nCurrentRefreshRate_CachedValue = 0;
+@@ -466,9 +476,16 @@ int g_nCurrentRefreshRate_CachedValue = 0;
  static void
  update_color_mgmt()
  {
-+	static bool s_bCurrentTraditionalHDROutput = false;
++	static bool s_bCurrentScaleSDRWhite = false;
 +
  	if ( !GetBackend()->GetCurrentConnector() )
  		return;
  
-+	const bool bTraditionalHDROutput = g_bOutputHDREnabled &&
-+		GetBackend()->GetCurrentConnector()->GetHDRInfo().IsHDRG22();
++	const bool bScaleSDRWhite = gamescope::ShouldScaleGamma22SDRWhite(
++		g_bOutputHDREnabled,
++		g_bAppWantsHDRCached,
++		GetBackend()->GetCurrentConnector()->GetHDRInfo().IsHDRG22() );
 +
  	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(
  		g_bOutputHDREnabled,
  		&g_ColorMgmt.pending.displayColorimetry, &g_ColorMgmt.pending.displayEOTF,
-@@ -480,7 +496,11 @@ update_color_mgmt()
+@@ -481,7 +498,11 @@ update_color_mgmt()
  	struct timespec t0, t1;
  #else
  	// check if any part of our color mgmt stack is dirty
@@ -117,25 +141,25 @@ index c1da072f986b1784f443d6e930f065e779acbb6f..8807059fa3c1dff8e15b93afb729f671
 +	if ( gamescope::ColorMgmtLutsAreCurrent(
 +		g_ColorMgmt.pending == g_ColorMgmt.current,
 +		g_ColorMgmt.serial != 0,
-+		s_bCurrentTraditionalHDROutput,
-+		bTraditionalHDROutput ) )
++		s_bCurrentScaleSDRWhite,
++		bScaleSDRWhite ) )
  		return;
  #endif
  
-@@ -490,7 +510,7 @@ update_color_mgmt()
+@@ -491,7 +512,7 @@ update_color_mgmt()
  
  	if (g_ColorMgmt.pending.enabled)
  	{
 -		create_color_mgmt_luts(g_ColorMgmt.pending, g_ColorMgmtLuts);
-+		create_color_mgmt_luts(g_ColorMgmt.pending, g_ColorMgmtLuts, bTraditionalHDROutput);
++		create_color_mgmt_luts(g_ColorMgmt.pending, g_ColorMgmtLuts, bScaleSDRWhite);
  	}
  	else
  	{
-@@ -524,13 +544,14 @@ update_color_mgmt()
+@@ -525,13 +546,14 @@ update_color_mgmt()
  
  	g_ColorMgmt.serial = ++s_NextColorMgmtSerial;
  	g_ColorMgmt.current = g_ColorMgmt.pending;
-+	s_bCurrentTraditionalHDROutput = bTraditionalHDROutput;
++	s_bCurrentScaleSDRWhite = bScaleSDRWhite;
  }
  
  static void
@@ -149,7 +173,7 @@ index c1da072f986b1784f443d6e930f065e779acbb6f..8807059fa3c1dff8e15b93afb729f671
  
  bool set_color_sdr_gamut_wideness( float flVal )
 diff --git a/tests/test_drm_composition.cpp b/tests/test_drm_composition.cpp
-index fc79946b4cec3f9f741b47d1af91c06212597d85..9e82dc6a566082eb277ba08256a2ab6ab675b746 100644
+index 8a62dd6..0dd9ee8 100644
 --- a/tests/test_drm_composition.cpp
 +++ b/tests/test_drm_composition.cpp
 @@ -1,6 +1,8 @@
@@ -161,7 +185,7 @@ index fc79946b4cec3f9f741b47d1af91c06212597d85..9e82dc6a566082eb277ba08256a2ab6a
  
  using namespace gamescope;
  
-@@ -17,3 +19,34 @@ TEST_CASE("Gamma 2.2 HDR cannot direct scan without hardware color management",
+@@ -17,3 +19,43 @@ TEST_CASE("Gamma 2.2 HDR cannot direct scan without hardware color management",
      REQUIRE( DrmHdrOutputRequiresVulkanComposition( true, false, EOTF_PQ, 2, true ) );
      REQUIRE( DrmHdrOutputRequiresVulkanComposition( true, false, EOTF_PQ, 1, false ) );
  }
@@ -195,4 +219,13 @@ index fc79946b4cec3f9f741b47d1af91c06212597d85..9e82dc6a566082eb277ba08256a2ab6a
 +{
 +    REQUIRE( Gamma22HdrSDRInputScale( false, EOTF_Gamma22, 203.0f, 650.0f ) == 1.0f );
 +    REQUIRE( Gamma22HdrSDRInputScale( false, EOTF_Gamma22, 500.0f, 650.0f ) == 1.0f );
++}
++
++TEST_CASE("Gamma 2.2 SDR white is only scaled against HDR content", "[color][hdr]")
++{
++    REQUIRE_FALSE( ShouldScaleGamma22SDRWhite( true, false, true ) );
++
++    REQUIRE( ShouldScaleGamma22SDRWhite( true, true, true ) );
++    REQUIRE_FALSE( ShouldScaleGamma22SDRWhite( false, true, true ) );
++    REQUIRE_FALSE( ShouldScaleGamma22SDRWhite( true, true, false ) );
 +}

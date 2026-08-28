@@ -1,0 +1,95 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: scope direct charging to Pocket EVO
+
+The writable Qualcomm ICL/PPS interface and its limits exist for the Pocket
+EVO direct-charge policy. Do not expose that interface on other machines that
+share qcom_battmgr.
+
+Keep the generic HL7139 compatible, but select the Android-derived register
+table only through the Pocket EVO match data. This avoids programming unknown
+HL7139 boards with EVO-specific protection thresholds.
+
+---
+ drivers/power/supply/hl7139_charger.c | 32 ++++++++++++++++++++++++++------
+ drivers/power/supply/qcom_battmgr.c   |  7 +++++++
+ 2 files changed, 33 insertions(+), 6 deletions(-)
+
+--- a/drivers/power/supply/hl7139_charger.c
++++ b/drivers/power/supply/hl7139_charger.c
+@@ -80,0 +81,5 @@
++struct hl7139_init_data {
++	const struct reg_sequence *sequence;
++	size_t num_sequence;
++};
++
+@@ -104,0 +110,5 @@
++static const struct hl7139_init_data hl7139_pocket_evo_data = {
++	.sequence = hl7139_pocket_evo_init,
++	.num_sequence = ARRAY_SIZE(hl7139_pocket_evo_init),
++};
++
+@@ -411,6 +421,7 @@ static int hl7139_probe(struct i2c_client *client)
+ 	struct device *dev = &client->dev;
+ 	struct power_supply_config cfg = {};
+ 	struct hl7139 *chip;
++	const struct hl7139_init_data *init_data;
+ 	const char *psy_name;
+ 	unsigned int id;
+ 	int ret;
+@@ -488,11 +499,19 @@ static int hl7139_probe(struct i2c_client *client)
+ 	dev_info(dev, "HL7139 charge pump, rev %lu\n",
+ 		 FIELD_GET(HL7139_DEV_REV_MASK, id));
+ 
+-	ret = regmap_multi_reg_write(chip->regmap, hl7139_pocket_evo_init,
+-				     ARRAY_SIZE(hl7139_pocket_evo_init));
+-	if (ret)
+-		return dev_err_probe(dev, ret,
+-				     "failed to initialize charge pump\n");
++	init_data = device_get_match_data(dev);
++	if (init_data) {
++		ret = regmap_multi_reg_write(chip->regmap, init_data->sequence,
++					     init_data->num_sequence);
++		if (ret)
++			return dev_err_probe(dev, ret,
++					     "failed to initialize charge pump\n");
++	}
++
++	ret = hl7139_set_charge_enable(chip, false);
++	if (ret)
++		return dev_err_probe(dev, ret,
++				     "failed to disable charge pump\n");
+ 
+ 	ret = hl7139_clear_irqs(chip, true);
+ 	if (ret)
+@@ -556,1 +575,2 @@
+-	{ .compatible = "ayaneo,pocket-evo-hl7139" },
++	{ .compatible = "ayaneo,pocket-evo-hl7139", .data = &hl7139_pocket_evo_data },
++	{ .compatible = "halomicro,hl7139" },
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -8,6 +8,7 @@
+ #include <linux/module.h>
+ #include <linux/mutex.h>
+ #include <linux/nvmem-consumer.h>
++#include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/power_supply.h>
+ #include <linux/property.h>
+@@ -1120,6 +1120,9 @@ static int qcom_battmgr_usb_set_property(struct power_supply *psy,
+ 	unsigned int property;
+ 	int ret;
+ 
++	if (!of_machine_is_compatible("ayaneo,pocketevo"))
++		return -EOPNOTSUPP;
++
+ 	if (!battmgr->service_up)
+ 		return -EAGAIN;
+ 	if (pval->intval < 0)
+@@ -1172,4 +1175,7 @@ static int qcom_battmgr_usb_is_writeable(struct power_supply *psy,
+ {
++	if (!of_machine_is_compatible("ayaneo,pocketevo"))
++		return 0;
++
+ 	return psp == POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT ||
+ 	       psp == POWER_SUPPLY_PROP_VOLTAGE_NOW;
+ }

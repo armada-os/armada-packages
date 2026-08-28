@@ -14,8 +14,8 @@ suspend is not blindly resumed.
 
 Signed-off-by: Armada <noreply@armada.local>
 ---
- drivers/power/supply/hl7139_charger.c | 29 +++++++++++++++++++++++++++++
- 1 file changed, 29 insertions(+)
+ drivers/power/supply/hl7139_charger.c | 30 ++++++++++++++++++++++++++++++
+ 1 file changed, 30 insertions(+)
 
 diff --git a/drivers/power/supply/hl7139_charger.c b/drivers/power/supply/hl7139_charger.c
 index f84c84eb7948..a1b2c3d4e5f6 100644
@@ -29,10 +29,7 @@ index f84c84eb7948..a1b2c3d4e5f6 100644
  #include <linux/power_supply.h>
  #include <linux/property.h>
  #include <linux/regmap.h>
-@@ -449,6 +450,34 @@
- 		hl7139_set_charge_enable(chip, false);
- }
- 
+@@ -453,0 +455,28 @@
 +/*
 + * Suspend safety: a direct-charge session must not survive a suspend.
 + * The charge pumps sit between VBUS and the battery with no PMIC
@@ -61,9 +58,6 @@ index f84c84eb7948..a1b2c3d4e5f6 100644
 +
 +static DEFINE_SIMPLE_DEV_PM_OPS(hl7139_pm_ops, hl7139_suspend, hl7139_resume);
 +
- static const struct of_device_id hl7139_of_match[] = {
- 	{ .compatible = "halomicro,hl7139" },
- 	{ }
 @@ -465,6 +494,7 @@
  	.driver = {
  		.name = "hl7139-charger",
