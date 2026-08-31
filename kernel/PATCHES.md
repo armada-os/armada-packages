@@ -57,6 +57,9 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0062-gpu-drm-panel-add-wt0630-panel.patch
   upstream: https://lore.kernel.org/r/20260625-topic-sm8650-ayaneo-pocket-s2-r63419-v8-2-8570e692143e@linaro.org
   notes: Ported to Linux 7.2's managed DRM panel allocator.
+- `patches/0063-gpu-drm-panel-add-wt0600-1k-panel.patch`
+  source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0063-gpu-drm-panel-add-wt0600-1k-panel.patch
+  notes: Standalone single-DSI driver for the 1080x1920 60Hz WT0600 panel (Pocket S 1K) from ROCKNIX PR #3007.
 - `patches/0104-drm-panel-Add-Retroid-Pocket-6-panel.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0104-drm-panel-Add-Retroid-Pocket-6-panel.patch
   upstream: unknown
@@ -481,6 +484,8 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pocketds.dts
 - `dts/qcs8550-ayaneo-pocketevo.dts`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pocketevo.dts
+- `dts/qcs8550-ayaneo-pockets1k.dts`
+  source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pockets1k.dts
 - `dts/qcs8550-ayaneo-pockets2k.dts`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pockets2k.dts
 - `dts/qcs8550-ayn-common.dtsi`
@@ -541,6 +546,9 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `dts/qcs8550-ayaneo-pocketdmg.dts.patch`
   source: armada
   notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketdmg.dts`.
+- `dts/qcs8550-ayaneo-pockets1k.dts.patch`
+  source: armada
+  notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pockets1k.dts`.
 - `dts/qcs8550-ayaneo-pockets2k.dts.patch`
   source: armada
   notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pockets2k.dts`.
