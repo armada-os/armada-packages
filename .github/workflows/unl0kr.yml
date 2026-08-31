@@ -1,7 +1,7 @@
 name: unl0kr
 on:
   push:
-    branches: [main]
+    branches: ['**']
     paths: ['unl0kr/**', 'oci/**', '.github/workflows/unl0kr.yml', '.github/workflows/_package-image.yml', 'toolchain.env']
   workflow_dispatch:
     inputs:
@@ -20,4 +20,3 @@ jobs:
     with:
       package: unl0kr
       branch: ${{ inputs.branch || '' }}
-      
