@@ -13,6 +13,6 @@ case "${pkg}" in
     mesa-android) mkdir -p ctx/waydroid && cp -r mesa-android/out/vendor ctx/waydroid/ ;;
     mesa-x86)     cp mesa-x86/out/ArmadaMesa.sqsh ctx/ ;;
     kernel)       mkdir -p ctx/kernel && cp kernel/out/armada-kernel-*.tar.zst kernel/out/armada-kernel-*.tar.zst.sha256 ctx/kernel/ ;;
-    armada-splash|armada-rgb|fex|mesa|mangohud|gamescope|gamescope-session|gamescope-session-steam|kwin|powerdevil|inputplumber|networkmanager|jupiter-hw-support|umtp-responder) mkdir -p ctx/rpms && cp "${pkg}"/out/*.rpm ctx/rpms/ ;;
+    armada-splash|armada-rgb|fex|mesa|mangohud|gamescope|gamescope-session|gamescope-session-steam|kwin|powerdevil|inputplumber|networkmanager|jupiter-hw-support|umtp-responder|unl0kr) mkdir -p ctx/rpms && cp "${pkg}"/out/*.rpm ctx/rpms/ ;;
     *) echo "unknown package: ${pkg}" >&2; exit 1 ;;
 esac
