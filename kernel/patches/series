@@ -106,6 +106,8 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0500-ROCKNIX-set-boot-fanspeed.patch
 0501-ROCKNIX-fix-wifi-and-bt-mac.patch
 0503-ROCKNIX-battery-name.patch
+0901-power-supply-qcom-battmgr-fix-charge-unit.patch
+0902-power-supply-qcom-battmgr-expose-charge-now.patch
 
 # ============== SM8650 (AYANEO Pocket S2, KONKR Pocket FIT) ==============
 0001-pcie-update-sm8650-dtsi.patch

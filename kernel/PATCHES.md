@@ -295,6 +295,14 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0503-ROCKNIX-battery-name.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0503-ROCKNIX-battery-name.patch
   upstream: unknown
+- `patches/0901-power-supply-qcom-battmgr-fix-charge-unit.patch`
+  source: https://lkml.iu.edu/2608.3/10893.html
+  upstream: https://lkml.iu.edu/2608.3/10893.html
+  notes: Carries the upstream SM8350-class fix that initializes the charge unit to mAh so CHARGE_FULL* is available to userspace.
+- `patches/0902-power-supply-qcom-battmgr-expose-charge-now.patch`
+  source: https://lkml.iu.edu/2608.3/10890.html
+  upstream: https://lkml.iu.edu/2608.3/10890.html
+  notes: Carries the upstream SM8350/SM8550 mapping of the firmware remaining-charge counter to CHARGE_NOW.
 - `patches/0900-power-supply-qcom-battmgr-log-usb-adapter-type.patch`
   source: armada
   upstream: local
