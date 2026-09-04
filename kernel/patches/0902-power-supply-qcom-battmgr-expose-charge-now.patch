@@ -1,4 +1,3 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 Subject: [PATCH] power: supply: qcom_battmgr: expose CHARGE_NOW on SM8350-class firmware
 
 SM8350-class firmware reports the remaining charge in BATT_CHG_COUNTER.
