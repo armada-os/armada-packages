@@ -19,6 +19,7 @@
 0060-drm-panel-icna35xx-luminance-linear-backlight-scale.patch
 0062-gpu-drm-panel-add-wt0630-panel.patch
 0104-drm-panel-Add-Retroid-Pocket-6-panel.patch
+0104a-drm-panel-visionox-vtdr6130-add-flip2.patch
 0105-drm-panel-Add-Retroid-Pocket-Nova-panel.patch
 0106-drm-panel-il97680a-luminance-linear-backlight-scale.patch
 
