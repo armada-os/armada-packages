@@ -12,10 +12,10 @@ the default behavior and existing fallbacks unchanged.
  2 files changed, 13 insertions(+), 4 deletions(-)
 
 diff --git a/src/main.cpp b/src/main.cpp
-index 6c30a21..bc8042a 100644
+index aefedb3f..b998019d 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -54,6 +54,7 @@ const char *g_pOriginalWaylandDisplay = nullptr;
+@@ -55,6 +55,7 @@ const char *g_pOriginalWaylandDisplay = nullptr;
  
  bool g_bAllowDeferredBackend = false;
  bool g_bExposeClientSampleableFormats = false;
@@ -23,7 +23,7 @@ index 6c30a21..bc8042a 100644
  
  int g_nCursorScaleHeight = -1;
  
-@@ -163,6 +164,7 @@ const struct option *gamescope_options = (struct option[]){
+@@ -167,6 +168,7 @@ const struct option *gamescope_options = (struct option[]){
  
  	{ "allow-deferred-backend", no_argument, nullptr, 0 },
  	{ "expose-client-sampleable-formats", no_argument, nullptr, 0 },
@@ -31,7 +31,7 @@ index 6c30a21..bc8042a 100644
  	{ "keep-alive", no_argument, nullptr, 0 },
  
  	{} // keep last
-@@ -288,6 +290,7 @@ const char usage[] =
+@@ -295,6 +297,7 @@ const char usage[] =
  	"  --allow-deferred-backend       Allows initting the backend in a deferred way, if it doesn't work immediately. (Note: This has some very minor correctness compromises that you should consider wrt. your platform with modifiers, etc).\n"
  	"  --expose-client-sampleable-formats\n"
  	"                                 Advertise Vulkan-sampleable client DMA-BUF formats even when the output backend cannot scan them out directly.\n"
@@ -39,7 +39,7 @@ index 6c30a21..bc8042a 100644
  	"  --keep-alive                   Keep Gamescope alive even when the primary process has died.\n"
  	"\n"
  	"Keyboard shortcuts:\n"
-@@ -916,6 +919,8 @@ int main(int argc, char **argv)
+@@ -950,6 +953,8 @@ int main(int argc, char **argv)
  					g_bAllowDeferredBackend = true;
  				} else if (strcmp(opt_name, "expose-client-sampleable-formats") == 0) {
  					g_bExposeClientSampleableFormats = true;
@@ -47,9 +47,9 @@ index 6c30a21..bc8042a 100644
 +					g_bForceVulkanRealtime = true;
  				} else if (strcmp(opt_name, "keep-alive") == 0) {
  					cv_shutdown_on_primary_child_death = false;
- 				} else if (strcmp(opt_name, "virtual-connector-strategy") == 0) {
+ 				} else if (strcmp(opt_name, "lease-connector") == 0) {
 diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
-index f71b4cb..4934bca 100644
+index 04d78da7..eb23af25 100644
 --- a/src/rendervulkan.cpp
 +++ b/src/rendervulkan.cpp
 @@ -58,6 +58,7 @@
@@ -60,7 +60,7 @@ index f71b4cb..4934bca 100644
  
  static constexpr mat3x4 g_rgb2yuv_srgb_to_bt601_limited = {{
    { 0.257f, 0.504f, 0.098f, 0.0625f },
-@@ -535,6 +536,9 @@ bool CVulkanDevice::createDevice()
+@@ -529,6 +530,9 @@ bool CVulkanDevice::createDevice()
  	}
  
  	float queuePriorities = 1.0f;
@@ -70,7 +70,7 @@ index f71b4cb..4934bca 100644
  
  	VkDeviceQueueGlobalPriorityCreateInfoEXT queueCreateInfoEXT = {
  		.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_EXT,
-@@ -546,14 +550,14 @@ bool CVulkanDevice::createDevice()
+@@ -540,14 +544,14 @@ bool CVulkanDevice::createDevice()
  	{
  		{
  			.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
@@ -87,7 +87,7 @@ index f71b4cb..4934bca 100644
  			.queueFamilyIndex = m_generalQueueFamily,
  			.queueCount = 1,
  			.pQueuePriorities = &queuePriorities
-@@ -679,14 +683,14 @@ bool CVulkanDevice::createDevice()
+@@ -673,14 +677,14 @@ bool CVulkanDevice::createDevice()
  	};
  
  	VkResult res = vk.CreateDevice(physDev(), &deviceCreateInfo, nullptr, &m_device);
@@ -104,5 +104,3 @@ index f71b4cb..4934bca 100644
  		{
  			fprintf(stderr, "vkCreateDevice failed with a high-priority queue (compute). Falling back to regular priority (all).\n");
  			queueCreateInfos[0].pNext = nullptr;
--- 
-2.55.0

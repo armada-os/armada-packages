@@ -17,7 +17,7 @@ drm-lease-v1 XML.
 
 ---
 diff --git a/protocol/meson.build b/protocol/meson.build
-index b1ab415..077412e 100644
+index cf8fbd18..de31d9b5 100644
 --- a/protocol/meson.build
 +++ b/protocol/meson.build
 @@ -5,7 +5,7 @@ wayland_scanner_path = wayland_scanner_dep.get_variable(pkgconfig: 'wayland_scan
@@ -38,7 +38,7 @@ index b1ab415..077412e 100644
  	'color-management-v1.xml',
  
 diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
-index 5a5b733..979877a 100644
+index 4ef9c7e0..9a5f52c9 100644
 --- a/src/Backends/DRMBackend.cpp
 +++ b/src/Backends/DRMBackend.cpp
 @@ -172,6 +172,8 @@ struct drm_t {
@@ -116,7 +116,7 @@ index 5a5b733..979877a 100644
  
  					drm_log.infof( "lease-connector: leased '%s' (connector=%u, crtc=%u, plane=%u) -> fd=%d, lessee=%u",
  						g_sLeaseConnectorName, uConnectorId, uCRTCId, uPlaneId, nLeaseFd, uLeaseId );
-@@ -4140,6 +4163,49 @@ const char *drm_get_device_name(struct drm_t *drm)
+@@ -4129,6 +4152,49 @@ const char *drm_get_device_name(struct drm_t *drm)
  	return drm->device_name;
  }
  
@@ -167,10 +167,10 @@ index 5a5b733..979877a 100644
  {
  	if ( !drm->pConnector )
 diff --git a/src/main.cpp b/src/main.cpp
-index 5c8b50d..9b004c9 100644
+index b998019d..c9158ddb 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
-@@ -795,6 +795,8 @@ const char *g_sOutputName = nullptr;
+@@ -792,6 +792,8 @@ const char *g_sOutputName = nullptr;
  const char *g_sLeaseConnectorName = nullptr;
  const char *g_sIgnoreTouchDevice = nullptr;
  std::atomic<int> g_nActiveLeaseClients = { 0 };
@@ -180,7 +180,7 @@ index 5c8b50d..9b004c9 100644
  bool g_bForceDisableColorMgmt = false;
  bool g_bRt = false;
 diff --git a/src/main.hpp b/src/main.hpp
-index eb98c85..5c9c2b3 100644
+index 47e01c9e..458934a2 100644
 --- a/src/main.hpp
 +++ b/src/main.hpp
 @@ -3,6 +3,7 @@
@@ -212,10 +212,10 @@ index eb98c85..5c9c2b3 100644
  {
      LINEAR = 0,
 diff --git a/src/wlserver.cpp b/src/wlserver.cpp
-index c2fa2cb..6205a7a 100644
+index 383f4aac..d654a005 100644
 --- a/src/wlserver.cpp
 +++ b/src/wlserver.cpp
-@@ -51,6 +51,7 @@
+@@ -52,6 +52,7 @@
  #include "gamescope-xwayland-protocol.h"
  #include "gamescope-pipewire-protocol.h"
  #include "gamescope-control-protocol.h"
@@ -223,7 +223,7 @@ index c2fa2cb..6205a7a 100644
  #include "gamescope-private-protocol.h"
  #include "gamescope-swapchain-protocol.h"
  #include "presentation-time-protocol.h"
-@@ -1553,6 +1554,195 @@ static void create_gamescope_control( void )
+@@ -1577,6 +1578,195 @@ static void create_gamescope_control( void )
  	wl_global_create( wlserver.display, &gamescope_control_interface, version, NULL, gamescope_control_bind );
  }
  
@@ -419,7 +419,7 @@ index c2fa2cb..6205a7a 100644
  ////////////////////////
  // gamescope_private
  ////////////////////////
-@@ -2221,6 +2411,8 @@ bool wlserver_init( void ) {
+@@ -2248,6 +2438,8 @@ bool wlserver_init( void ) {
  
  	create_gamescope_control();
  

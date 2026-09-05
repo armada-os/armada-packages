@@ -20,7 +20,7 @@ unchanged when present.
 
 diff --git a/src/HDRTonemap.h b/src/HDRTonemap.h
 new file mode 100644
-index 0000000..24d01cf
+index 00000000..24d01cf5
 --- /dev/null
 +++ b/src/HDRTonemap.h
 @@ -0,0 +1,40 @@
@@ -65,10 +65,10 @@ index 0000000..24d01cf
 +    }
 +}
 diff --git a/src/rendervulkan.hpp b/src/rendervulkan.hpp
-index c49b95f..7bbf46f 100644
+index d3f2b7cb..f8f5f40c 100644
 --- a/src/rendervulkan.hpp
 +++ b/src/rendervulkan.hpp
-@@ -453,6 +453,7 @@ struct gamescope_color_mgmt_t
+@@ -504,6 +504,7 @@ struct gamescope_color_mgmt_t
  
  	// HDR Display Metadata Override & Tonemapping
  	ETonemapOperator hdrTonemapOperator = ETonemapOperator_None;
@@ -77,7 +77,7 @@ index c49b95f..7bbf46f 100644
  	tonemap_info_t hdrTonemapSourceMetadata = { 0 };
  
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index fab5160..2c74605 100644
+index f7fb9895..df25c3db 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
 @@ -31,6 +31,7 @@
@@ -88,7 +88,7 @@ index fab5160..2c74605 100644
  #include "gamescope_shared.h"
  #include "xwayland_ctx.hpp"
  #include <X11/X.h>
-@@ -399,8 +400,18 @@ create_color_mgmt_luts(
+@@ -403,8 +404,18 @@ create_color_mgmt_luts(
  					tonemap_info_t source = newColorMgmt.hdrTonemapSourceMetadata;
  					tonemap_info_t dest = newColorMgmt.hdrTonemapDisplayMetadata;
  					// Otherwise, rely on the Vulkan source info and the EDID
@@ -109,7 +109,7 @@ index fab5160..2c74605 100644
  
  					// Adjust the source brightness range by the requested HDR input gain
  					dest.flBlackPointNits /= flGain;
-@@ -409,7 +420,14 @@ create_color_mgmt_luts(
+@@ -413,7 +424,14 @@ create_color_mgmt_luts(
  					if ( source.BIsValid() && dest.BIsValid() )
  					{
  						tonemapping.eOperator = newColorMgmt.hdrTonemapOperator;
@@ -125,7 +125,7 @@ index fab5160..2c74605 100644
  					}
  					else
  					{
-@@ -6455,6 +6473,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+@@ -7256,6 +7274,7 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
  	if ( ev->atom == ctx->atoms.gamescopeHDRTonemapOperator )
  	{
  		g_ColorMgmt.pending.hdrTonemapOperator = (ETonemapOperator) get_prop( ctx, ctx->root, ctx->atoms.gamescopeHDRTonemapOperator, 0 );
@@ -134,7 +134,7 @@ index fab5160..2c74605 100644
  	}
  
 diff --git a/tests/test_drm_composition.cpp b/tests/test_drm_composition.cpp
-index b31bb39..a08d192 100644
+index b31bb39c..a08d192a 100644
 --- a/tests/test_drm_composition.cpp
 +++ b/tests/test_drm_composition.cpp
 @@ -3,6 +3,9 @@

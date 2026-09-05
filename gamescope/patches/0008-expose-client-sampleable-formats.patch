@@ -9,7 +9,7 @@ direct scanout stays protected by the DRM framebuffer import check.
 
 diff --git a/src/ClientFormatPolicy.h b/src/ClientFormatPolicy.h
 new file mode 100644
-index 0000000..914b00d
+index 00000000..914b00d1
 --- /dev/null
 +++ b/src/ClientFormatPolicy.h
 @@ -0,0 +1,19 @@
@@ -33,7 +33,7 @@ index 0000000..914b00d
 +    }
 +}
 diff --git a/src/main.cpp b/src/main.cpp
-index 5862187..9fc2ef8 100644
+index 8dbd1a95..aefedb3f 100644
 --- a/src/main.cpp
 +++ b/src/main.cpp
 @@ -54,6 +54,7 @@ const char *g_pOriginalDisplay = nullptr;
@@ -61,7 +61,7 @@ index 5862187..9fc2ef8 100644
  	"  --keep-alive                   Keep Gamescope alive even when the primary process has died.\n"
  	"\n"
  	"Keyboard shortcuts:\n"
-@@ -942,6 +946,8 @@ int main(int argc, char **argv)
+@@ -944,6 +948,8 @@ int main(int argc, char **argv)
  					g_bLaunchMangoapp = true;
  				} else if (strcmp(opt_name, "allow-deferred-backend") == 0) {
  					g_bAllowDeferredBackend = true;
@@ -71,7 +71,7 @@ index 5862187..9fc2ef8 100644
  					cv_shutdown_on_primary_child_death = false;
  				} else if (strcmp(opt_name, "lease-connector") == 0) {
 diff --git a/src/rendervulkan.cpp b/src/rendervulkan.cpp
-index 1db9a46..5bb1fe5 100644
+index b6eb3627..04d78da7 100644
 --- a/src/rendervulkan.cpp
 +++ b/src/rendervulkan.cpp
 @@ -32,6 +32,7 @@
@@ -90,7 +90,7 @@ index 1db9a46..5bb1fe5 100644
  
  static constexpr mat3x4 g_rgb2yuv_srgb_to_bt601_limited = {{
    { 0.257f, 0.504f, 0.098f, 0.0625f },
-@@ -2871,11 +2873,16 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
+@@ -2900,11 +2902,16 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
  				continue;
  			}
  
@@ -111,7 +111,7 @@ index 1db9a46..5bb1fe5 100644
  			}
  
  			wlr_drm_format_set_add( &sampledDRMFormats, drmFormat, modifier );
-@@ -2887,8 +2894,17 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
+@@ -2916,8 +2923,17 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
  	}
  	else
  	{
@@ -130,7 +130,7 @@ index 1db9a46..5bb1fe5 100644
  
  		wlr_drm_format_set_add( &sampledDRMFormats, drmFormat, DRM_FORMAT_MOD_INVALID );
  		return false;
-@@ -2897,6 +2913,16 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
+@@ -2926,6 +2942,16 @@ bool vulkan_init_format(VkFormat format, uint32_t drmFormat)
  
  bool vulkan_init_formats()
  {
@@ -148,21 +148,21 @@ index 1db9a46..5bb1fe5 100644
  	{
  		if (s_DRMVKFormatTable[i].internal)
 diff --git a/tests/meson.build b/tests/meson.build
-index 6dfc456..5d5b9b1 100644
+index cfb21c4d..43fde224 100644
 --- a/tests/meson.build
 +++ b/tests/meson.build
 @@ -9,7 +9,7 @@ unittest_src += srcdir / 'edid.cpp'
  
  gamescope_tests = executable(
  	'gamescope_tests',
--	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_display_lookup.cpp', 'test_drm_composition.cpp', 'test_edid.cpp'],
-+	unittest_src + ['test_client_format_policy.cpp', 'test_convar.cpp', 'test_process.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_display_lookup.cpp', 'test_drm_composition.cpp', 'test_edid.cpp'],
+-	unittest_src + ['test_convar.cpp', 'test_focus_placement.cpp', 'test_mangoapp_config.cpp', 'test_mangoapp_control.cpp', 'test_process.cpp', 'test_upscale.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_vrclient_detect.cpp', 'test_display_lookup.cpp', 'test_drm_composition.cpp', 'test_edid.cpp'],
++	unittest_src + ['test_client_format_policy.cpp', 'test_convar.cpp', 'test_focus_placement.cpp', 'test_mangoapp_config.cpp', 'test_mangoapp_control.cpp', 'test_process.cpp', 'test_upscale.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_vrclient_detect.cpp', 'test_display_lookup.cpp', 'test_drm_composition.cpp', 'test_edid.cpp'],
  	include_directories: [srcdir, sol2_include],
  	dependencies: [catch2_dep, luajit_dep, cap_dep, displayinfo_dep, drm_dep, glm_dep, wlroots_dep],
  	cpp_args: gamescope_cpp_args,
 diff --git a/tests/test_client_format_policy.cpp b/tests/test_client_format_policy.cpp
 new file mode 100644
-index 0000000..bf1557f
+index 00000000..bf1557fa
 --- /dev/null
 +++ b/tests/test_client_format_policy.cpp
 @@ -0,0 +1,18 @@

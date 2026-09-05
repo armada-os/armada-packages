@@ -7,10 +7,10 @@ STEAM_GAME atom). Yields to the real window as soon as one appears. Focus
 selection only, off the per-frame composite path.
 
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index 72d9909..c1da072 100644
+index 231e245a..2054a092 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
-@@ -3533,6 +3533,23 @@ pick_primary_focus_and_override(
+@@ -4251,6 +4251,23 @@ pick_primary_focus_and_override(
  found:;
  	}
  
