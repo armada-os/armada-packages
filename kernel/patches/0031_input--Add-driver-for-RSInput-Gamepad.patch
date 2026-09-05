@@ -258,7 +258,7 @@ index 000000000000..913c499ad30a
 +    uint8_t mcu_params[] = {
 +        DATA_COMMOD_SET_PAR,
 +        0x01,
-+        0x00, 0x00, 0x00, 0x28,
++        0x00, 0x00, 0x00, 0x0A,
 +        0x00, 0x00, 0x00, 0x02
 +    };
 +    error = rsinput_send_command(drv, CMD_COMMOD, mcu_params, sizeof(mcu_params));
