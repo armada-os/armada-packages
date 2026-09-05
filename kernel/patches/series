@@ -107,6 +107,17 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0501-ROCKNIX-fix-wifi-and-bt-mac.patch
 0503-ROCKNIX-battery-name.patch
 
+# ============== Charging ==============
+0901-power-supply-qcom-battmgr-set-usb-input-current-limit.patch
+0902-power-supply-qcom-battmgr-report-pd-pps-adapter.patch
+0063-power-supply-add-HL7139-charge-pump.patch
+0903-power-supply-hl7139-suspend-safety.patch
+0904-power-supply-qcom-battmgr-charging-status.patch
+0905-power-supply-hl7139-latch-faults-and-report-vbat.patch
+0906-power-supply-hl7139-verify-suspend-shutdown.patch
+0907-power-supply-harden-pocket-evo-charge-contract.patch
+0908-power-supply-scope-pocket-evo-direct-charge.patch
+
 # ============== SM8650 (AYANEO Pocket S2, KONKR Pocket FIT) ==============
 0001-pcie-update-sm8650-dtsi.patch
 0006-add-hw_params-callback-function-to-drm_connector_hdmi_audio_ops.patch

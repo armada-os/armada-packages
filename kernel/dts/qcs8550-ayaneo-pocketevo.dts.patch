@@ -35,3 +35,39 @@ Subject: [PATCH] arm64: dts: qcom: pocketevo: keep auxiliary keys from waking
  		};
  	};
  };
+
+diff --git a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketevo.dts b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketevo.dts
+index 1d83ad8..3411c9c 100644
+--- a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketevo.dts
++++ b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketevo.dts
+@@ -124,6 +124,30 @@
+ 
+ };
+ 
++/*
++ * The Pocket EVO has two parallel HL7139 2:1 direct-charge pumps. Android
++ * describes them as master (0x5f) and slave (0x5e) on QUP hub I2C2. Keep the
++ * pumps disabled at probe; userspace may enable them only after a valid 9 V
++ * PD contract and charge-policy checks.
++ */
++&i2c_hub_2 {
++	charger@5e {
++		compatible = "ayaneo,pocket-evo-hl7139", "halomicro,hl7139";
++		reg = <0x5e>;
++		intr-gpios = <&tlmm 9 GPIO_ACTIVE_HIGH>;
++		power-supply-name = "hl7139-slave";
++		status = "okay";
++	};
++
++	charger@5f {
++		compatible = "ayaneo,pocket-evo-hl7139", "halomicro,hl7139";
++		reg = <0x5f>;
++		intr-gpios = <&tlmm 8 GPIO_ACTIVE_HIGH>;
++		power-supply-name = "hl7139-master";
++		status = "okay";
++	};
++};
++
+ &i2c4 {
+ 	clock-frequency = <400000>;
+ 	status = "okay";
