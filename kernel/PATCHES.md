@@ -479,7 +479,12 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: armada
   upstream: local
   notes: Armada added this follow-up to limit `0612` to playback MI2S DAIs; without it, the ROCKNIX change would affect every playback DAI using the shared q6apm driver.
-
+- `0618-drm-msm-dp-dont-fail-audio-prepare-when-display-off.patch`
+  source: https://github.com/slaide/distribution/blob/06c1cdfdb0309c45ba7db34049b8aa4b16d20507/projects/ROCKNIX/devices/SM8750/patches/linux/0618-drm-msm-dp-dont-fail-audio-prepare-when-display-off.patch
+  upstream: local
+  notes: Armada modified this DP check to allow proper DP audio set up
+  when the DP display is not powered on to allow the sound card profile to be
+  set up.
 - `dts/qcs8550-ayaneo-pocketace.dts`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pocketace.dts
 - `dts/qcs8550-ayaneo-pocket-common.dtsi`

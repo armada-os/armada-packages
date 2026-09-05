@@ -1,9 +1,11 @@
 From: Armada <noreply@armada.local>
 Subject: [PATCH] arm64: dts: qcom: pocket-fit-elite: use the full Chipone binding
+and DP Alt Audio
 
 Armada uses ROCKNIX's full chipone_tddi fork for both KONKR devices rather
 than the unverified lean driver carried in the SM8750 patch set. Describe the
 Elite touchscreen using the vendor properties consumed by that driver.
+Additionally, add DP alt audio support to the Elite device tree.
 
 --- a/arch/arm64/boot/dts/qcom/sm8750-konkr-pf-elite.dts
 +++ b/arch/arm64/boot/dts/qcom/sm8750-konkr-pf-elite.dts
@@ -56,3 +58,23 @@ Elite touchscreen using the vendor properties consumed by that driver.
  		pinctrl-names = "default", "sleep";
  		pinctrl-0 = <&ts_int_default>;
  		pinctrl-1 = <&ts_int_sleep>;
+@@ -1517,6 +1514,19 @@
+			cpu { sound-dai = <&q6apmbedai TX_CODEC_DMA_TX_3>; };
+			platform { sound-dai = <&q6apm>; };
+		};
++
++		/* HDMI audio out over USB-C DP alt mode. The codec side is the
++		 * hdmi-codec the DP bridge registers as a child of &mdss_dp0, and
++		 * this link is also what makes the machine driver create the
++		 * "DP0 Jack" control that UCM keys the HDMI device off.
++		 * Needs the DISPLAY_PORT_RX_0 graph in the topology blob, see
++		 * devices/SM8750/audio-topology/. */
++		dp-dai-link {
++			link-name = "DisplayPort Playback";
++			codec { sound-dai = <&mdss_dp0>; };
++			cpu { sound-dai = <&q6apmbedai DISPLAY_PORT_RX_0>; };
++			platform { sound-dai = <&q6apm>; };
++		};
+	};
+
+	wcn7860-pmu {
