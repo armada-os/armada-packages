@@ -1,0 +1,261 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] input: rsinput: learn rest points from the MCU, radial deadzone
+
+The MCU reports raw analog values. Triggers rest at ~1830 (Odin 3) or
+~1740 (RP6), not at the 0x610 the driver subtracts from, so the first
+10-15 % of a pull reads 0. Sticks rest up to ~60 counts off centre, per
+assembly, and the only deadzone available is a per-axis hard cut on the
+uncentred value.
+
+Learn the rest points after every MCU init (probe and resume): the
+trigger rest is the highest raw value seen, the stick centre is adopted
+once from eight identical frames within 64 counts of zero. Scale triggers
+and each stick side from the learned rest so a released control reads 0
+and full travel still reaches the advertised range. Replace the hard cut
+with a radial rescaled deadzone whose radius is the larger of the stick's
+two axis_*_deadzone parameters, default 0, so the DT axis-deadzone
+property and saved calibrations keep working.
+
+--- a/drivers/input/joystick/rsinput.c
++++ b/drivers/input/joystick/rsinput.c
+@@ -21,6 +21,12 @@
+ #include <linux/workqueue.h>
+ #include <uapi/linux/sched/types.h>
+ 
++#define RSINPUT_STICK_DEADZONE_DEFAULT  0
++#define RSINPUT_STICK_LEARN_FRAMES      8
++#define RSINPUT_STICK_LEARN_BOUND       64
++#define RSINPUT_TRIGGER_BAND            32
++#define RSINPUT_TRIGGER_RAW_MAX         4095
++
+ static int update_params=0;
+ static bool rumble_enable = true;
+ 
+@@ -37,25 +43,25 @@
+ static int axis_leftx_min=-0x580;
+ static int axis_leftx_center=0x0;
+ static int axis_leftx_max=0x580;
+-static int axis_leftx_deadzone=0x0;
++static int axis_leftx_deadzone=RSINPUT_STICK_DEADZONE_DEFAULT;
+ static int axis_leftx_antideadzone=0x0;
+ 
+ static int axis_lefty_min=-0x580;
+ static int axis_lefty_center=0x0;
+ static int axis_lefty_max=0x580;
+-static int axis_lefty_deadzone=0x0;
++static int axis_lefty_deadzone=RSINPUT_STICK_DEADZONE_DEFAULT;
+ static int axis_lefty_antideadzone=0x0;
+ 
+ static int axis_rightx_min=-0x580;
+ static int axis_rightx_center=0x0;
+ static int axis_rightx_max=0x580;
+-static int axis_rightx_deadzone=0x0;
++static int axis_rightx_deadzone=RSINPUT_STICK_DEADZONE_DEFAULT;
+ static int axis_rightx_antideadzone=0x0;
+ 
+ static int axis_righty_min=-0x580;
+ static int axis_righty_center=0x0;
+ static int axis_righty_max=0x580;
+-static int axis_righty_deadzone=0x0;
++static int axis_righty_deadzone=RSINPUT_STICK_DEADZONE_DEFAULT;
+ static int axis_righty_antideadzone=0x0;
+ 
+ module_param(update_params,int,0660);
+@@ -128,6 +134,21 @@
+ 
+ #define MCU_VERSION_MAX_LEN       64
+ 
++enum rsinput_ctl {
++    RSINPUT_LX, RSINPUT_LY, RSINPUT_RX, RSINPUT_RY, RSINPUT_TL, RSINPUT_TR, RSINPUT_NCTL
++};
++
++static const char *const rsinput_ctl_name[RSINPUT_NCTL] = {
++    "left-x", "left-y", "right-x", "right-y", "left-trigger", "right-trigger"
++};
++
++struct rsinput_rest {
++    int value;
++    int last;
++    int run;
++    bool learned;
++};
++
+ struct rsinput_driver {
+     struct serdev_device *serdev;
+     struct input_dev *input;
+@@ -145,8 +166,104 @@
+     struct work_struct rumble_work;
+     int rumble_effect_id;
+     int rumble_val;
++    struct rsinput_rest rest[RSINPUT_NCTL];
+ };
+ 
++/* radial deadzone, rescaled so the output is continuous from the radius */
++static void rsinput_radial_deadzone(int cx, int cy, int radius, int range, int *ox, int *oy)
++{
++    int mag, scaled;
++
++    if (range <= 0) {
++        *ox = 0;
++        *oy = 0;
++        return;
++    }
++    radius = clamp(radius, 0, range - 1);
++    mag = int_sqrt((unsigned long)cx * cx + (unsigned long)cy * cy);
++    if (mag <= radius) {
++        *ox = 0;
++        *oy = 0;
++        return;
++    }
++    scaled = (mag - radius) * range / (range - radius);
++    *ox = clamp(cx * scaled / mag, -range, range);
++    *oy = clamp(cy * scaled / mag, -range, range);
++}
++
++/* 0 at the learned rest (minus a noise band), range at raw 0 */
++static int rsinput_trigger_scale(int rest, int raw, int range)
++{
++    int span = rest - RSINPUT_TRIGGER_BAND;
++    int value = span - raw;
++
++    if (range <= 0)
++        return 0;
++    if (span <= 0)
++        return clamp(range - raw, 0, range);
++    if (value <= 0)
++        return 0;
++    return clamp(value * range / span, 0, range);
++}
++
++/* scale each side from the rest so both edges still reach +-range */
++static int rsinput_stick_scale(int centred, int rest, int range)
++{
++    int span = centred >= 0 ? range - rest : range + rest;
++
++    if (range <= 0 || span <= 0 || span >= 2 * range)
++        return centred;
++    return clamp(centred * range / span, -range, range);
++}
++
++static void rsinput_rest_reset(struct rsinput_driver *drv)
++{
++    memset(drv->rest, 0, sizeof(drv->rest));
++}
++
++/* centre: first RSINPUT_STICK_LEARN_FRAMES identical frames within the bound, once per MCU init */
++static int rsinput_stick_centre(struct rsinput_driver *drv, enum rsinput_ctl id, int raw)
++{
++    struct rsinput_rest *r = &drv->rest[id];
++
++    if (r->learned)
++        return r->value;
++
++    if (raw == r->last) {
++        r->run++;
++    } else {
++        r->last = raw;
++        r->run = 1;
++    }
++
++    if (r->run >= RSINPUT_STICK_LEARN_FRAMES && abs(raw) <= RSINPUT_STICK_LEARN_BOUND) {
++        r->value = raw;
++        r->learned = true;
++        dev_info(&drv->serdev->dev, "%s rests at %d\n", rsinput_ctl_name[id], raw);
++        return raw;
++    }
++
++    return 0;
++}
++
++/* trigger rest: highest raw seen since MCU init */
++static int rsinput_trigger_rest(struct rsinput_driver *drv, enum rsinput_ctl id, int raw)
++{
++    struct rsinput_rest *r = &drv->rest[id];
++
++    if (raw < 0 || raw > RSINPUT_TRIGGER_RAW_MAX)
++        return r->value;
++
++    if (!r->learned || raw > r->value) {
++        if (!r->learned)
++            dev_info(&drv->serdev->dev, "%s rests at %d\n", rsinput_ctl_name[id], raw);
++        r->value = raw;
++        r->learned = true;
++    }
++
++    return r->value;
++}
++
+ static const unsigned int keymap[] = {
+     BTN_DPAD_UP, BTN_DPAD_DOWN, BTN_DPAD_LEFT, BTN_DPAD_RIGHT,
+     BTN_NORTH,   BTN_WEST,	    BTN_EAST,	   BTN_SOUTH,
+@@ -294,29 +411,41 @@
+         input_report_key(drv->input, keymap[i], (current_states & BIT(i)));
+     }
+ 
+-    int16_t raw_trig_l = (data[FRAME_POS_DATA_3] | (data[FRAME_POS_DATA_4] << 8));
+-    int16_t z = trigger_left_max - raw_trig_l;
++    int raw_trig_l = (data[FRAME_POS_DATA_3] | (data[FRAME_POS_DATA_4] << 8));
++    int z = rsinput_trigger_scale(rsinput_trigger_rest(drv, RSINPUT_TL, raw_trig_l),
++                                  raw_trig_l, trigger_left_max);
+     z = ( z < trigger_left_deadzone ) ? 0 : z - trigger_left_antideadzone;
+ 
+-    int16_t raw_trig_r = (data[FRAME_POS_DATA_5] | (data[FRAME_POS_DATA_6] << 8));
+-    int16_t rz = trigger_right_max - raw_trig_r;
++    int raw_trig_r = (data[FRAME_POS_DATA_5] | (data[FRAME_POS_DATA_6] << 8));
++    int rz = rsinput_trigger_scale(rsinput_trigger_rest(drv, RSINPUT_TR, raw_trig_r),
++                                   raw_trig_r, trigger_right_max);
+     rz = ( rz < trigger_right_deadzone ) ? 0 : rz - trigger_right_antideadzone;
+ 
+-    int16_t raw_x = -(int16_t)(data[FRAME_POS_DATA_7] | (data[FRAME_POS_DATA_8] << 8));
+-    int16_t x = raw_x + axis_leftx_center;
+-    x = ( abs(x) < axis_leftx_deadzone ) ? 0 : INT_SIGN(x) * ( abs(x) - axis_leftx_antideadzone );
+-
+-    int16_t raw_y = -(int16_t)(data[FRAME_POS_DATA_9] | (data[FRAME_POS_DATA_10] << 8));
+-    int16_t y = raw_y + axis_lefty_center;
+-    y = ( abs(y) < axis_lefty_deadzone ) ? 0 : INT_SIGN(y) * ( abs(y) - axis_lefty_antideadzone );
+-
+-    int16_t raw_rx = -(int16_t)(data[FRAME_POS_DATA_11] | (data[FRAME_POS_DATA_12] << 8));
+-    int16_t rx = raw_rx + axis_rightx_center;
+-    rx = ( abs(rx) < axis_rightx_deadzone ) ? 0 : INT_SIGN(rx) * ( abs(rx) - axis_rightx_antideadzone );
+-
+-    int16_t raw_ry = -(int16_t)(data[FRAME_POS_DATA_13] | (data[FRAME_POS_DATA_14] << 8));
+-    int16_t ry = raw_ry + axis_righty_center;
+-    ry = ( abs(ry) < axis_righty_deadzone ) ? 0 : INT_SIGN(ry) * ( abs(ry) - axis_righty_antideadzone );
++    int raw_x = -(int16_t)(data[FRAME_POS_DATA_7] | (data[FRAME_POS_DATA_8] << 8));
++    int raw_y = -(int16_t)(data[FRAME_POS_DATA_9] | (data[FRAME_POS_DATA_10] << 8));
++    int raw_rx = -(int16_t)(data[FRAME_POS_DATA_11] | (data[FRAME_POS_DATA_12] << 8));
++    int raw_ry = -(int16_t)(data[FRAME_POS_DATA_13] | (data[FRAME_POS_DATA_14] << 8));
++    int rest_x = rsinput_stick_centre(drv, RSINPUT_LX, raw_x) - axis_leftx_center;
++    int rest_y = rsinput_stick_centre(drv, RSINPUT_LY, raw_y) - axis_lefty_center;
++    int rest_rx = rsinput_stick_centre(drv, RSINPUT_RX, raw_rx) - axis_rightx_center;
++    int rest_ry = rsinput_stick_centre(drv, RSINPUT_RY, raw_ry) - axis_righty_center;
++    int range_l = max(abs(axis_leftx_max), abs(axis_lefty_max));
++    int range_r = max(abs(axis_rightx_max), abs(axis_righty_max));
++    int x, y, rx, ry;
++
++    rsinput_radial_deadzone(rsinput_stick_scale(raw_x - rest_x, rest_x, range_l),
++                            rsinput_stick_scale(raw_y - rest_y, rest_y, range_l),
++                            max(axis_leftx_deadzone, axis_lefty_deadzone), range_l,
++                            &x, &y);
++    rsinput_radial_deadzone(rsinput_stick_scale(raw_rx - rest_rx, rest_rx, range_r),
++                            rsinput_stick_scale(raw_ry - rest_ry, rest_ry, range_r),
++                            max(axis_rightx_deadzone, axis_righty_deadzone), range_r,
++                            &rx, &ry);
++
++    x  = x  ? INT_SIGN(x)  * ( abs(x)  - axis_leftx_antideadzone )  : 0;
++    y  = y  ? INT_SIGN(y)  * ( abs(y)  - axis_lefty_antideadzone )  : 0;
++    rx = rx ? INT_SIGN(rx) * ( abs(rx) - axis_rightx_antideadzone ) : 0;
++    ry = ry ? INT_SIGN(ry) * ( abs(ry) - axis_righty_antideadzone ) : 0;
+ 
+     input_report_abs(drv->input, ABS_Z, z);
+     input_report_abs(drv->input, ABS_RZ, rz);
+@@ -710,6 +839,9 @@
+ {
+     struct rsinput_driver *drv = dev_get_drvdata(dev);
+ 
++    /* the MCU is power-cycled across suspend */
++    rsinput_rest_reset(drv);
++
+     return rsinput_init_commands(drv);
+ }
+ 

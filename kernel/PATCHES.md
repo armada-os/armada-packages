@@ -207,7 +207,11 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/1300-input-rsinput-axis-deadzone.patch`
   source: armada
   upstream: local
-  notes: Armada replaced ROCKNIX's global experimental Odin 3 range and deadzone defaults with a per-device `axis-deadzone` property. The Odin 3 DTS supplies its range and deadzone explicitly.
+  notes: Armada replaced ROCKNIX's global experimental Odin 3 range and deadzone defaults with a per-device `axis-deadzone` property. Since 1301 the property sets the radius of a rescaled radial deadzone (driver default 0, i.e. pass-through) instead of a per-axis hard cut, and the Odin 3 DTS no longer sets it.
+- `patches/1301-input-rsinput-radial-deadzone-and-rest-learning.patch`
+  source: armada
+  upstream: not submitted
+  notes: The RSInput MCU reports raw values: triggers rest at ~1830 (Odin 3) / ~1740 (RP6) rather than the 0x610 the driver subtracted from (10-15 % of trigger travel lost), sticks rest up to ~60 counts off centre with ~20 counts of release scatter, and the only deadzone in the chain was a per-axis hard cut on the uncentred value (Steam Input applies none for these controllers). The driver now learns each control's rest point from the MCU after every MCU init (probe and resume; the rest points move between MCU power cycles), scales triggers from the learned rest, and makes the deadzone a radial rescaled one applied after centring, radius = the larger of the stick's two `axis_*_deadzone` parameters, default 0 so the centred value passes through like any other controller and deadzone policy stays with Steam Input and the game; `axis-deadzone` and saved calibrations keep working. Measured on the Odin 3 and RP6: 0 at rest on all axes, full reach, exact radial response when a radius is set.
 - `patches/0059-ASoC-aw88395-lib-skip-monitor-sections-in-V1-ACF-parse.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0059-ASoC-aw88395-lib-skip-monitor-sections-in-V1-ACF-parse.patch
   upstream: unknown
