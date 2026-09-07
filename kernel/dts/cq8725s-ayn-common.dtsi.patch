@@ -11,13 +11,12 @@ Subject: [PATCH] arm64: dts: qcom: cq8725s: configure the Odin 3 gamepad
  		};
  	};
  
-@@ -1390,6 +1390,9 @@
+@@ -1390,6 +1390,8 @@
  
  	gamepad {
  		compatible = "gamepad,rsinput";
 +		rumble-haptics;
 +		axis-range = <1024>;
-+		axis-deadzone = <70>;
  
  		gamepad-name = "AYN Odin3 Gamepad";
  		gamepad-bus = <0x0003>;
