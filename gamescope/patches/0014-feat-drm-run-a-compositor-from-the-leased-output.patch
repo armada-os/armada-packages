@@ -75,9 +75,9 @@ index 979877a..7815212 100644
 +	drm_log.infof( "lease-connector: companion app disconnected" );
 +}
 +
-+void drm_lease_send_touch( DrmLeaseTouchType type, double x, double y, int touchId, uint32_t time )
++void drm_lease_send_touch( DrmLeaseEventType type, double x, double y, int touchId, uint32_t time )
 +{
-+	static_assert( sizeof( DrmLeaseTouchEvent ) == 20 );
++	static_assert( sizeof( DrmLeaseEvent ) == 20 );
 +	std::lock_guard lock( g_leaseClientMutex );
 +	if ( !g_bLeaseClientWantsTouch )
 +		return;
@@ -86,7 +86,7 @@ index 979877a..7815212 100644
 -		listenPfd.fd = drm->nLeaseSocketFd;
 -		listenPfd.events = POLLIN;
 -		pfds.push_back( listenPfd );
-+	DrmLeaseTouchEvent event = {
++	DrmLeaseEvent event = {
 +		.type = type,
 +		.touchId = touchId,
 +		.time = time,
@@ -315,23 +315,23 @@ index 5c9c2b3..5d7fc97 100644
  const char *drm_lease_connector_name();
  uint32_t drm_lease_connector_id();
  
-+enum class DrmLeaseTouchType : uint32_t
++enum class DrmLeaseEventType : uint32_t
 +{
 +	Down = 1,
 +	Motion,
 +	Up,
 +};
 +
-+struct DrmLeaseTouchEvent
++struct DrmLeaseEvent
 +{
-+	DrmLeaseTouchType type;
++	DrmLeaseEventType type;
 +	int32_t touchId;
 +	uint32_t time;
 +	float x;
 +	float y;
 +};
 +
-+void drm_lease_send_touch( DrmLeaseTouchType type, double x, double y, int touchId, uint32_t time );
++void drm_lease_send_touch( DrmLeaseEventType type, double x, double y, int touchId, uint32_t time );
 +
  enum class GamescopeUpscaleFilter : uint32_t
  {
@@ -360,7 +360,7 @@ index 6205a7a..08e866b 100644
  
  	if ( touch->bIgnoreWhileLeased && g_nActiveLeaseClients.load() > 0 )
 +	{
-+		drm_lease_send_touch( DrmLeaseTouchType::Down, event->x, event->y, event->touch_id, event->time_msec );
++		drm_lease_send_touch( DrmLeaseEventType::Down, event->x, event->y, event->touch_id, event->time_msec );
  		return;
 +	}
  
@@ -371,7 +371,7 @@ index 6205a7a..08e866b 100644
  
  	if ( touch->bIgnoreWhileLeased && g_nActiveLeaseClients.load() > 0 )
 +	{
-+		drm_lease_send_touch( DrmLeaseTouchType::Up, 0.0, 0.0, event->touch_id, event->time_msec );
++		drm_lease_send_touch( DrmLeaseEventType::Up, 0.0, 0.0, event->touch_id, event->time_msec );
  		return;
 +	}
  
@@ -382,7 +382,7 @@ index 6205a7a..08e866b 100644
  
  	if ( touch->bIgnoreWhileLeased && g_nActiveLeaseClients.load() > 0 )
 +	{
-+		drm_lease_send_touch( DrmLeaseTouchType::Motion, event->x, event->y, event->touch_id, event->time_msec );
++		drm_lease_send_touch( DrmLeaseEventType::Motion, event->x, event->y, event->touch_id, event->time_msec );
  		return;
 +	}
  
@@ -395,24 +395,24 @@ index 6205a7a..08e866b 100644
 +static int g_nDrmLeaseFd = -1;
 +static int g_nDrmLeaseSocketFd = -1;
 +static struct wl_event_source *g_pDrmLeaseEventSource = nullptr;
-+static DrmLeaseTouchEvent g_drmLeaseTouchEvent = {};
-+static size_t g_nDrmLeaseTouchBytes = 0;
++static DrmLeaseEvent g_drmLeaseEvent = {};
++static size_t g_nDrmLeaseEventBytes = 0;
 +
-+static void drm_lease_client_dispatch_touch()
++static void drm_lease_client_dispatch_event()
 +{
 +	auto *pConnector = GetBackend()->GetCurrentConnector();
-+	switch ( g_drmLeaseTouchEvent.type )
++	switch ( g_drmLeaseEvent.type )
 +	{
-+		case DrmLeaseTouchType::Down:
-+			wlserver_touchdown( g_drmLeaseTouchEvent.x, g_drmLeaseTouchEvent.y,
-+				g_drmLeaseTouchEvent.touchId, g_drmLeaseTouchEvent.time, pConnector );
++		case DrmLeaseEventType::Down:
++			wlserver_touchdown( g_drmLeaseEvent.x, g_drmLeaseEvent.y,
++				g_drmLeaseEvent.touchId, g_drmLeaseEvent.time, pConnector );
 +			break;
-+		case DrmLeaseTouchType::Motion:
-+			wlserver_touchmotion( g_drmLeaseTouchEvent.x, g_drmLeaseTouchEvent.y,
-+				g_drmLeaseTouchEvent.touchId, g_drmLeaseTouchEvent.time, false, pConnector );
++		case DrmLeaseEventType::Motion:
++			wlserver_touchmotion( g_drmLeaseEvent.x, g_drmLeaseEvent.y,
++				g_drmLeaseEvent.touchId, g_drmLeaseEvent.time, false, pConnector );
 +			break;
-+		case DrmLeaseTouchType::Up:
-+			wlserver_touchup( g_drmLeaseTouchEvent.touchId, g_drmLeaseTouchEvent.time );
++		case DrmLeaseEventType::Up:
++			wlserver_touchup( g_drmLeaseEvent.touchId, g_drmLeaseEvent.time );
 +			break;
 +	}
 +}
@@ -431,15 +431,15 @@ index 6205a7a..08e866b 100644
 +
 +	while ( true )
 +	{
-+		char *pWrite = reinterpret_cast<char *>( &g_drmLeaseTouchEvent ) + g_nDrmLeaseTouchBytes;
-+		ssize_t nRead = recv( fd, pWrite, sizeof( g_drmLeaseTouchEvent ) - g_nDrmLeaseTouchBytes, MSG_DONTWAIT );
++		char *pWrite = reinterpret_cast<char *>( &g_drmLeaseEvent ) + g_nDrmLeaseEventBytes;
++		ssize_t nRead = recv( fd, pWrite, sizeof( g_drmLeaseEvent ) - g_nDrmLeaseEventBytes, MSG_DONTWAIT );
 +		if ( nRead > 0 )
 +		{
-+			g_nDrmLeaseTouchBytes += nRead;
-+			if ( g_nDrmLeaseTouchBytes != sizeof( g_drmLeaseTouchEvent ) )
++			g_nDrmLeaseEventBytes += nRead;
++			if ( g_nDrmLeaseEventBytes != sizeof( g_drmLeaseEvent ) )
 +				continue;
-+			drm_lease_client_dispatch_touch();
-+			g_nDrmLeaseTouchBytes = 0;
++			drm_lease_client_dispatch_event();
++			g_nDrmLeaseEventBytes = 0;
 +			continue;
 +		}
 +		if ( nRead == 0 )
