@@ -94,6 +94,9 @@ v9_20260729_qualcomm_crypto_qce_runtime_pm_interconnect.patch
 0511-scsi-ufs-qcom-reenable-irq-on-host-reset-failure.patch
 0512-PCI-qcom-skip-L23-ready-poll-on-SM8550.patch
 0513-PCI-qcom-honour-an-opp-suspend-opp-as-the-non-s2ram-memory-floor.patch
+0525-remoteproc-qcom_q6v5_pas-propagate-dev_pm_genpd_set_performance_state-errors.patch
+0526-dt-bindings-remoteproc-qcom-sm8550-pas-make-qcom-hawi-cdsp-pas-standalone.patch
+0527-remoteproc-qcom_q6v5_pas-add-per-PD-proxy-performance-states-for-Hawi-CDSP.patch
 
 # ============== SM8550 DTSI prerequisites ==============
 0001-pcie-update-sm8550-dtsi.patch
