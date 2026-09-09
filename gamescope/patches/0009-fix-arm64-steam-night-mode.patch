@@ -8,10 +8,10 @@ Subject: [PATCH] steamcompmgr: work around ARM64 Steam night mode property
  1 file changed, 8 insertions(+)
 
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index b64d459..8ca2bf4 100644
+index b74b8a7e..f7fb9895 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
-@@ -6508,9 +6508,17 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
+@@ -7394,9 +7394,17 @@ handle_property_notify(xwayland_ctx_t *ctx, XPropertyEvent *ev)
  		}
  
  		nightmode_t nightmode;
@@ -29,6 +29,3 @@ index b64d459..8ca2bf4 100644
  
  		if ( set_color_nightmode( nightmode ) )
  			hasRepaint = true;
--- 
-2.55.0
-

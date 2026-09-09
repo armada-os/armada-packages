@@ -18,7 +18,7 @@ takes over, so SDR layers encode unscaled for the fade duration.
 
 diff --git a/src/HDRGamma22.h b/src/HDRGamma22.h
 new file mode 100644
-index 0000000..65f4150
+index 00000000..65f4150b
 --- /dev/null
 +++ b/src/HDRGamma22.h
 @@ -0,0 +1,50 @@
@@ -73,7 +73,7 @@ index 0000000..65f4150
 +    }
 +}
 diff --git a/src/steamcompmgr.cpp b/src/steamcompmgr.cpp
-index ca543e8..e386123 100644
+index 2054a092..b74b8a7e 100644
 --- a/src/steamcompmgr.cpp
 +++ b/src/steamcompmgr.cpp
 @@ -30,6 +30,7 @@
@@ -84,7 +84,7 @@ index ca543e8..e386123 100644
  #include "gamescope_shared.h"
  #include "xwayland_ctx.hpp"
  #include <X11/X.h>
-@@ -160,6 +161,7 @@ static lut3d_t g_tmpLut3d;
+@@ -161,6 +162,7 @@ static lut3d_t g_tmpLut3d;
  extern int g_nDynamicRefreshHz;
  
  bool g_bForceHDRSupportDebug = false;
@@ -92,7 +92,7 @@ index ca543e8..e386123 100644
  extern float g_flInternalDisplayBrightnessNits;
  extern float g_flHDRItmSdrNits;
  extern float g_flHDRItmTargetNits;
-@@ -324,7 +326,10 @@ static const gamescope_color_mgmt_t k_ScreenshotColorMgmtHDR =
+@@ -327,7 +329,10 @@ static const gamescope_color_mgmt_t k_ScreenshotColorMgmtHDR =
  // sudo cpupower frequency-set --governor performance
  
  static void
@@ -104,7 +104,7 @@ index ca543e8..e386123 100644
  {
  	const displaycolorimetry_t& displayColorimetry = newColorMgmt.displayColorimetry;
  	const displaycolorimetry_t& outputEncodingColorimetry = newColorMgmt.outputEncodingColorimetry;
-@@ -361,6 +366,11 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
+@@ -365,6 +370,11 @@ create_color_mgmt_luts(const gamescope_color_mgmt_t& newColorMgmt, gamescope_col
  				if ( newColorMgmt.outputEncodingEOTF == EOTF_Gamma22 )
  				{
  					// G22 -> G22. Does not matter what the g22 mult is
@@ -116,7 +116,7 @@ index ca543e8..e386123 100644
  					tonemapping.g22_luminance = 1.f;
  					// xwm_log.infof("G22 -> G22");
  				}
-@@ -466,9 +476,16 @@ int g_nCurrentRefreshRate_CachedValue = 0;
+@@ -591,9 +601,16 @@ static CBacklightWatcher g_BacklightWatcher;
  static void
  update_color_mgmt()
  {
@@ -133,7 +133,7 @@ index ca543e8..e386123 100644
  	GetBackend()->GetCurrentConnector()->GetNativeColorimetry(
  		g_bOutputHDREnabled,
  		&g_ColorMgmt.pending.displayColorimetry, &g_ColorMgmt.pending.displayEOTF,
-@@ -481,7 +498,11 @@ update_color_mgmt()
+@@ -611,7 +628,11 @@ update_color_mgmt()
  	struct timespec t0, t1;
  #else
  	// check if any part of our color mgmt stack is dirty
@@ -146,7 +146,7 @@ index ca543e8..e386123 100644
  		return;
  #endif
  
-@@ -491,7 +512,7 @@ update_color_mgmt()
+@@ -621,7 +642,7 @@ update_color_mgmt()
  
  	if (g_ColorMgmt.pending.enabled)
  	{
@@ -155,7 +155,7 @@ index ca543e8..e386123 100644
  	}
  	else
  	{
-@@ -525,13 +546,14 @@ update_color_mgmt()
+@@ -655,13 +676,14 @@ update_color_mgmt()
  
  	g_ColorMgmt.serial = ++s_NextColorMgmtSerial;
  	g_ColorMgmt.current = g_ColorMgmt.pending;
@@ -173,7 +173,7 @@ index ca543e8..e386123 100644
  
  bool set_color_sdr_gamut_wideness( float flVal )
 diff --git a/tests/test_drm_composition.cpp b/tests/test_drm_composition.cpp
-index 8a62dd6..0dd9ee8 100644
+index fc79946b..b31bb39c 100644
 --- a/tests/test_drm_composition.cpp
 +++ b/tests/test_drm_composition.cpp
 @@ -1,6 +1,8 @@

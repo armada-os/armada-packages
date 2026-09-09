@@ -15,9 +15,9 @@ Summary:        Input router and remapper daemon for handheld gaming devices
 License:        GPL-3.0-or-later
 URL:            %{forgeurl}
 Source0:        %{forgeurl}/archive/%{commit}/%{name}-%{commit}.tar.gz
-Patch1:         0001-fix-CapabilityMap-preserve-signed-axis-button-mappin.patch
-Patch2:         0002-fix-gamepad-honor-passthrough-config-skip-exclusive-grab.patch
-Patch3:         0003-fix-force-feedback-reset-effects-when-replacing-targets.patch
+Patch1:         0001-fix-gamepad-honor-passthrough-config-skip-exclusive-grab.patch
+Patch2:         0002-fix-force-feedback-reset-effects-when-replacing-targets.patch
+Patch3:         0003-feat-Hardware-Support-Add-AYANEO-Pocket-DS.patch
 
 BuildRequires:  cargo
 BuildRequires:  rust
@@ -40,9 +40,9 @@ Requires:       dbus
 
 %description
 InputPlumber detects, manages, and routes input from handheld gaming devices,
-including combining devices into a single virtual gamepad. armada fork: carries
-the dpad signed-axis-button mapping fix, and honors 'passthrough' for gamepad
-source devices (upstream only wired it up for keyboard sources).
+including combining devices into a single virtual gamepad. The Armada fork adds
+support for gamepad-source 'passthrough' and resets force-feedback effects when
+replacing or suspending virtual targets.
 
 %prep
 %autosetup -n %{appname}-%{commit} -p1

@@ -6,3 +6,5 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
 
 - `patches/0001-input-panel-allow-configuring-output-by-env.patch`
   source: armada
+- `patches/0002-x11-windowed-select-touch-events.patch`
+  source: armada

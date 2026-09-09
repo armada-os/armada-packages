@@ -8,13 +8,12 @@ PACKAGE_DIR="${PWD}"
 source ./BASE.env
 source ../toolchain.env
 
-REST="${SRPM#kwin-}"
-KWIN_VER="${REST%%-*}"
-KWIN_REL="${REST#*-}"
-KWIN_REL="${KWIN_REL%.fc*}"
+REST="${SRPM#plasma-mobile-}"
+PLASMA_MOBILE_VER="${REST%%-*}"
+PLASMA_MOBILE_REL="${REST#*-}"
+PLASMA_MOBILE_REL="${PLASMA_MOBILE_REL%.fc*}"
 DIST=".fc44.armada"
-
-SUBPKGS="kwin kwin-common kwin-libs"
+PATCH="0001-mobileshell-shellutil-Simplify-the-Set-Input-Region-.patch"
 
 rm -rf out
 mkdir -p out
@@ -24,10 +23,10 @@ podman run --rm \
   --workdir /work \
   --platform linux/aarch64 \
   --env SRPM="${SRPM}" \
-  --env KWIN_VER="${KWIN_VER}" \
-  --env KWIN_REL="${KWIN_REL}" \
+  --env PLASMA_MOBILE_VER="${PLASMA_MOBILE_VER}" \
+  --env PLASMA_MOBILE_REL="${PLASMA_MOBILE_REL}" \
   --env DIST="${DIST}" \
-  --env SUBPKGS="${SUBPKGS}" \
+  --env PATCH="${PATCH}" \
   "${BUILDER_IMAGE}" \
   bash -euxo pipefail -c '
     export HOME=/tmp
@@ -42,25 +41,23 @@ EOF
     cd /tmp
     koji download-build --arch=src "${SRPM}"
     rpm -i "${SRPM}.src.rpm"
-    SPEC="$HOME/rpmbuild/SPECS/kwin.spec"
+    SPEC="$HOME/rpmbuild/SPECS/plasma-mobile.spec"
 
-    sed -i "s/^Release:.*/Release: ${KWIN_REL}%{?dist}/" "$SPEC"
+    sed -i "s/^Release:.*/Release: ${PLASMA_MOBILE_REL}%{?dist}/" "$SPEC"
 
-    cp /work/patches/*.patch "$HOME/rpmbuild/SOURCES/"
+    cp "/work/patches/${PATCH}" "$HOME/rpmbuild/SOURCES/"
     LAST=$(grep -nE "^(Patch|Source)[0-9]*:" "$SPEC" | tail -1 | cut -d: -f1)
     [ -n "$LAST" ] || { echo "ERROR: no Source/Patch line to anchor on"; exit 1; }
-    sed -i "${LAST}a Patch9001: 0001-input-panel-allow-configuring-output-by-env.patch" "$SPEC"
-    sed -i "$((LAST + 1))a Patch9002: 0002-x11-windowed-select-touch-events.patch" "$SPEC"
+    sed -i "${LAST}a Patch9001: ${PATCH}" "$SPEC"
 
     grep -qE "^[[:space:]]*%autosetup" "$SPEC" \
-        || { echo "ERROR: kwin.spec does not auto-apply patches; adjust build.sh"; exit 1; }
+        || { echo "ERROR: plasma-mobile.spec does not auto-apply patches; adjust build.sh"; exit 1; }
 
     dnf -y builddep "$SPEC"
     rpmbuild -bb --define "dist ${DIST}" "$SPEC"
 
-    for p in ${SUBPKGS}; do
-        cp "$HOME"/rpmbuild/RPMS/*/"${p}-${KWIN_VER}-${KWIN_REL}${DIST}".*.rpm /work/out/
-    done
-'
+    cp "$HOME"/rpmbuild/RPMS/*/plasma-mobile-"${PLASMA_MOBILE_VER}-${PLASMA_MOBILE_REL}${DIST}".*.rpm /work/out/
+    cp "$HOME"/rpmbuild/RPMS/*/plasma-lookandfeel-fedora-mobile-"${PLASMA_MOBILE_VER}-${PLASMA_MOBILE_REL}${DIST}".*.rpm /work/out/
+  '
 
 echo "built: ${PACKAGE_DIR}/out"

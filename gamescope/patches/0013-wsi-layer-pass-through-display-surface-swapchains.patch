@@ -11,10 +11,10 @@ retired path); the warning stays for genuinely unhooked swapchains.
 
 ---
 diff --git a/layer/VkLayer_FROG_gamescope_wsi.cpp b/layer/VkLayer_FROG_gamescope_wsi.cpp
-index c6ca5b1..d25e97c 100644
+index 5ece3d1e..060a266d 100644
 --- a/layer/VkLayer_FROG_gamescope_wsi.cpp
 +++ b/layer/VkLayer_FROG_gamescope_wsi.cpp
-@@ -15,6 +15,8 @@
+@@ -21,6 +21,8 @@
  #include <algorithm>
  #include <functional>
  #include <unordered_map>
@@ -23,7 +23,7 @@ index c6ca5b1..d25e97c 100644
  #include <optional>
  
  #include <poll.h>
-@@ -532,6 +534,32 @@ namespace GamescopeWSILayer {
+@@ -570,6 +572,32 @@ namespace GamescopeWSILayer {
    };
    VKROOTS_DEFINE_SYNCHRONIZED_MAP_TYPE(GamescopeSurface, VkSurfaceKHR);
  
@@ -56,7 +56,7 @@ index c6ca5b1..d25e97c 100644
    struct GamescopeSwapchainData {
      gamescope_swapchain *object;
      wl_display* display;
-@@ -742,6 +770,18 @@ namespace GamescopeWSILayer {
+@@ -780,6 +808,18 @@ namespace GamescopeWSILayer {
        return GetPhysicalDeviceGamescopePresentationSupport(pDispatch, gamescopeInstance, physicalDevice, queueFamilyIndex);
      }
  
@@ -75,7 +75,7 @@ index c6ca5b1..d25e97c 100644
      static VkResult CreateXcbSurfaceKHR(
        const vkroots::VkInstanceDispatch* pDispatch,
              VkInstance                   instance,
-@@ -1003,6 +1043,12 @@ namespace GamescopeWSILayer {
+@@ -1041,6 +1081,12 @@ namespace GamescopeWSILayer {
              VkInstance                   instance,
              VkSurfaceKHR                 surface,
        const VkAllocationCallbacks*       pAllocator) {
@@ -88,7 +88,7 @@ index c6ca5b1..d25e97c 100644
        if (auto state = GamescopeSurface::get(surface)) {
          pDispatch->DestroySurfaceKHR(instance, state->fallbackSurface, pAllocator);
          wl_surface_destroy(state->surface);
-@@ -1149,6 +1195,12 @@ namespace GamescopeWSILayer {
+@@ -1187,6 +1233,12 @@ namespace GamescopeWSILayer {
              VkDevice                   device,
              VkSwapchainKHR             swapchain,
        const VkAllocationCallbacks*     pAllocator) {
@@ -101,7 +101,7 @@ index c6ca5b1..d25e97c 100644
        if (auto state = GamescopeSwapchain::get(swapchain)) {
          gamescope_swapchain_destroy(state->object);
        }
-@@ -1164,6 +1216,14 @@ namespace GamescopeWSILayer {
+@@ -1202,6 +1254,14 @@ namespace GamescopeWSILayer {
        const VkSwapchainCreateInfoKHR*  pCreateInfo,
        const VkAllocationCallbacks*     pAllocator,
              VkSwapchainKHR*            pSwapchain) {
@@ -116,7 +116,7 @@ index c6ca5b1..d25e97c 100644
        auto gamescopeSurface = GamescopeSurface::get(pCreateInfo->surface);
  
        if (!gamescopeSurface) {
-@@ -1423,6 +1483,41 @@ namespace GamescopeWSILayer {
+@@ -1461,6 +1521,41 @@ namespace GamescopeWSILayer {
        const vkroots::VkDeviceDispatch* pDispatch,
              VkQueue                    queue,
        const VkPresentInfoKHR*          pPresentInfo) {
@@ -157,4 +157,4 @@ index c6ca5b1..d25e97c 100644
 +
        VkPresentInfoKHR presentInfo = *pPresentInfo;
  
-       bool forceFifo = gamescopeIsForcingFifo();
+       auto pPresentTimes = vkroots::FindInChain<const VkPresentTimesInfoGOOGLE>(&presentInfo);

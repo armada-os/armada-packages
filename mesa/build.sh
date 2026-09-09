@@ -64,13 +64,6 @@ EOF
                 \"\$HOME/rpmbuild/SOURCES/${SOURCE_TARBALL}\" | \
                 sha256sum --check --status --strict
 
-            # Mesa 26.2 split driver defaults out of the aggregate drirc files.
-            for config in asahi d3d12 msm panfrost r300 r600 radeonsi v3d virtio_gpu vmwgfx zink; do
-                sed -i \"/^%files dri-drivers\$/a %{_datadir}/drirc.d/00-\${config}-defaults.conf\" \"\$SPEC\"
-            done
-            for config in dzn hk lavapipe nvk panvk pvr turnip v3dv venus; do
-                sed -i \"/^%files vulkan-drivers\$/a %{_datadir}/drirc.d/00-\${config}-defaults.conf\" \"\$SPEC\"
-            done
         fi
 
         LAST=\$(grep -nE '^(Patch|Source)[0-9]*:' \"\$SPEC\" | tail -1 | cut -d: -f1)

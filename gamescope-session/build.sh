@@ -73,11 +73,17 @@ EOF
     TIMESTAMP=$(TZ=UTC date +%m%d%H)
 
     sed -i \
-      -e "/^Release:/s/%?dist/.${TIMESTAMP}%{?dist}.armada/" \
+      -e "/^Release:/s/%{?dist}/.${TIMESTAMP}%{?dist}.armada/" \
       -e "/^%build$/i %global build_cflags %{build_cflags} ${ARMADA_MARCH}" \
       -e "/^%build$/i %global build_cxxflags %{build_cxxflags} ${ARMADA_MARCH}" \
       -e "s/^%autosetup\>/%autosetup -p1/" \
       "${SPEC}"
+
+    grep -q '^Release:.*armada' "${SPEC}" || {
+      echo "ERROR: failed to add Armada release suffix to gamescope-session spec"
+      grep '^Release:' "${SPEC}"
+      exit 1
+    }
 
     # Fail in case spec is invalid
     rpmspec -P "${SPEC}" >/dev/null

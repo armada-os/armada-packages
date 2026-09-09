@@ -6,10 +6,10 @@ connectors only), internal, and has_edid to known-display matches() so Lua
 profiles can identify EDID-less panels.
 
 diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
-index a40ccc2..ca053ff 100644
+index 919f7005..0e61b374 100644
 --- a/src/Backends/DRMBackend.cpp
 +++ b/src/Backends/DRMBackend.cpp
-@@ -2904,7 +2904,19 @@ namespace gamescope
+@@ -2902,7 +2902,19 @@ namespace gamescope
  		{
  			CScriptScopedLock script;
  
@@ -30,7 +30,7 @@ index a40ccc2..ca053ff 100644
  			if ( oKnownDisplay )
  			{
  				sol::table tTable = oKnownDisplay->second;
-@@ -3014,9 +3026,11 @@ namespace gamescope
+@@ -3001,9 +3013,11 @@ namespace gamescope
  					bHasKnownHDRInfo = true;
  				}
  			}
@@ -45,7 +45,7 @@ index a40ccc2..ca053ff 100644
  				{
  					const drmModeModeInfo *pPreferredMode = find_mode( m_pConnector.get(), 0, 0, 0 );
 diff --git a/src/Script/Script.cpp b/src/Script/Script.cpp
-index 9833339..fae5bfa 100644
+index 98333390..fae5bfa1 100644
 --- a/src/Script/Script.cpp
 +++ b/src/Script/Script.cpp
 @@ -243,16 +243,20 @@ namespace gamescope
@@ -75,7 +75,7 @@ index 9833339..fae5bfa 100644
          for ( auto iter : KnownDisplays )
          {
 diff --git a/src/Script/Script.h b/src/Script/Script.h
-index 1e5a5ff..4f3390d 100644
+index 1e5a5ff0..4f3390db 100644
 --- a/src/Script/Script.h
 +++ b/src/Script/Script.h
 @@ -2,7 +2,9 @@
@@ -121,7 +121,7 @@ index 1e5a5ff..4f3390d 100644
      };
  
 diff --git a/src/edid.cpp b/src/edid.cpp
-index 4ecd80b..7e31b88 100644
+index 4ecd80b1..7e31b888 100644
 --- a/src/edid.cpp
 +++ b/src/edid.cpp
 @@ -225,6 +225,9 @@ namespace gamescope
@@ -135,21 +135,21 @@ index 4ecd80b..7e31b88 100644
                      // Data block is where the dtd was.
                      uint8_t *data_block = dtd;
 diff --git a/tests/meson.build b/tests/meson.build
-index f870d82..508039f 100644
+index e766bc91..bb67cb28 100644
 --- a/tests/meson.build
 +++ b/tests/meson.build
 @@ -9,7 +9,7 @@ unittest_src += srcdir / 'edid.cpp'
  
  gamescope_tests = executable(
  	'gamescope_tests',
--	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_edid.cpp'],
-+	unittest_src + ['test_convar.cpp', 'test_process.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_display_lookup.cpp', 'test_edid.cpp'],
+-	unittest_src + ['test_convar.cpp', 'test_focus_placement.cpp', 'test_mangoapp_config.cpp', 'test_mangoapp_control.cpp', 'test_process.cpp', 'test_upscale.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_vrclient_detect.cpp', 'test_edid.cpp'],
++	unittest_src + ['test_convar.cpp', 'test_focus_placement.cpp', 'test_mangoapp_config.cpp', 'test_mangoapp_control.cpp', 'test_process.cpp', 'test_upscale.cpp', 'test_utils_parsers.cpp', 'test_utils_string.cpp', 'test_vrclient_detect.cpp', 'test_display_lookup.cpp', 'test_edid.cpp'],
  	include_directories: [srcdir, sol2_include],
  	dependencies: [catch2_dep, luajit_dep, cap_dep, displayinfo_dep, drm_dep, glm_dep, wlroots_dep],
  	cpp_args: gamescope_cpp_args,
 diff --git a/tests/test_display_lookup.cpp b/tests/test_display_lookup.cpp
 new file mode 100644
-index 0000000..db7618b
+index 00000000..db7618bf
 --- /dev/null
 +++ b/tests/test_display_lookup.cpp
 @@ -0,0 +1,70 @@
@@ -224,7 +224,7 @@ index 0000000..db7618b
 +    script.Manager().Gamescope().Config.KnownDisplays["test_model_panel"] = sol::lua_nil;
 +}
 diff --git a/tests/test_edid.cpp b/tests/test_edid.cpp
-index 144111e..37ea7a0 100644
+index 144111ec..37ea7a00 100644
 --- a/tests/test_edid.cpp
 +++ b/tests/test_edid.cpp
 @@ -1,5 +1,6 @@

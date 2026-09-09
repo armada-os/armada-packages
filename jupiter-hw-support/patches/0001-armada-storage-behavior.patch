@@ -8,15 +8,15 @@
  
  # Shared between this and format-device.sh to ensure we're not
  # double-triggering nor automounting while formatting or vice-versa.
-@@ -40,7 +41,7 @@
-     detected_us=$(make_dbus_udisks_call get-property data t "${drive}" Drive TimeMediaDetected)
-     # The 5 seconds window is taken from the original GNOME fix that inspired this one
-     # https://gitlab.gnome.org/GNOME/gvfs/-/commit/b4800b987b4a8423a52306c9aef35b3777464cc5
--    if (( detected_us / 1000000 + 5 < current_time )); then
-+    if (( detected_us / 1000000 + 30 < current_time )); then
-         echo "Skipping mounting /dev/${DEVBASE} because it has not been inserted recently" >&2
-         exit 0
-     fi
+@@ -50,7 +51,7 @@
+         detected_us=$(make_dbus_udisks_call get-property data t "${drive}" Drive TimeMediaDetected)
+         # The 5 seconds window is taken from the original GNOME fix that inspired this one
+         # https://gitlab.gnome.org/GNOME/gvfs/-/commit/b4800b987b4a8423a52306c9aef35b3777464cc5
+-        if (( detected_us / 1000000 + 5 < current_time )); then
++        if (( detected_us / 1000000 + 30 < current_time )); then
+             echo "Skipping mounting /dev/${DEVBASE} because it has not been inserted recently" >&2
+             exit 0
+         fi
 --- a/usr/lib/hwsupport/common-functions	2024-06-24 21:24:02.000000000 -0400
 +++ b/usr/lib/hwsupport/common-functions	2026-07-03 12:59:09.443041405 -0400
 @@ -52,3 +52,124 @@

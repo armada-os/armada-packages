@@ -67,7 +67,7 @@ index ab2c5b7..47a35c8 100644
 --- a/src/input/composite_device/targets.rs
 +++ b/src/input/composite_device/targets.rs
 @@ -189,7 +189,17 @@ impl CompositeDeviceTargets {
-             for (_, target_devices) in self.target_devices_by_capability.iter_mut() {
+             for target_devices in self.target_devices_by_capability.values_mut() {
                  target_devices.remove(&path);
              }
 -            stop_tasks.spawn(async move { target.stop().await });
@@ -115,7 +115,7 @@ index ab2c5b7..47a35c8 100644
      async fn target_kinds_running(
          &self,
 @@ -563,12 +595,21 @@ impl CompositeDeviceTargets {
-             for (_, target_devices) in self.target_devices_by_capability.iter_mut() {
+             for target_devices in self.target_devices_by_capability.values_mut() {
                  target_devices.remove(&path);
              }
 -            if let Err(e) = target.stop().await {
@@ -238,4 +238,3 @@ index ab8f3c2..5ed2fdd 100644
                          implementation.write_event(event)?;
 -- 
 2.55.0
-

@@ -1,5 +1,5 @@
 %global upstream_name jupiter-hw-support
-%global packagever jupiter-3.6-20240624.1
+%global packagever jupiter-3.7-20251020.1
 %global source_date_epoch_from_changelog 0
 
 Name:           armada-jupiter-hw-support
