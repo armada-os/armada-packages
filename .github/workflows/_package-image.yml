@@ -94,7 +94,7 @@ jobs:
       - name: Stage image context
         run: |
           bash scripts/stage.sh ${{ inputs.package }}
-          echo "Staged for ${IMAGE}:" && find ctx -type f
+          echo "Staged for ${IMAGE,,}:" && find ctx -type f
 
       - name: Build + push
         id: push
@@ -106,22 +106,22 @@ jobs:
           if [ -n "${{ inputs.image_arch }}" ]; then
             ARCH_FLAG=(--arch "${{ inputs.image_arch }}")
           fi
-          buildah build "${ARCH_FLAG[@]}" -f oci/Containerfile -t "${IMAGE}:${IMMUTABLE_TAG}" .
-          buildah tag "${IMAGE}:${IMMUTABLE_TAG}" "${IMAGE}:${CHANNEL_TAG}"
+          buildah build "${ARCH_FLAG[@]}" -f oci/Containerfile -t "${IMAGE,,}:${IMMUTABLE_TAG}" .
+          buildah tag "${IMAGE,,}:${IMMUTABLE_TAG}" "${IMAGE,,}:${CHANNEL_TAG}"
           echo "${{ secrets.GITHUB_TOKEN }}" | buildah login -u "${{ github.actor }}" --password-stdin ghcr.io
-          buildah push "${IMAGE}:${IMMUTABLE_TAG}"
-          buildah push --digestfile /tmp/digest "${IMAGE}:${CHANNEL_TAG}"
+          buildah push "${IMAGE,,}:${IMMUTABLE_TAG}"
+          buildah push --digestfile /tmp/digest "${IMAGE,,}:${CHANNEL_TAG}"
           DIGEST="$(cat /tmp/digest)"
           echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
           {
             echo "### \`${{ inputs.package }}\` published"
             echo "Branch/channel tag:"
             echo '```'
-            echo "${IMAGE}:${CHANNEL_TAG}"
+            echo "${IMAGE,,}:${CHANNEL_TAG}"
             echo '```'
             echo "Immutable digest pin for armada's Containerfile:"
             echo '```'
-            echo "${IMAGE}@${DIGEST}"
+            echo "${IMAGE,,}@${DIGEST}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -130,4 +130,4 @@ jobs:
       - name: Sign image (cosign keyless)
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
-          cosign sign --yes "${IMAGE}@${{ steps.push.outputs.digest }}"
+          cosign sign --yes "${IMAGE,,}@${{ steps.push.outputs.digest }}"

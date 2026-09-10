@@ -211,6 +211,7 @@ CONFIG_LRU_GEN_ENABLED=y                     # bare LRU_GEN only builds MGLRU, t
 CONFIG_TRANSPARENT_HUGEPAGE_MADVISE=y        # not defconfig's ALWAYS, which bloats FEX RAM
 CONFIG_PSI=y                                 # Waydroid lmkd memory-pressure monitoring
 CONFIG_PSI_DEFAULT_DISABLED=y                # opt in with psi=1
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y      # set the default scheduler
 
 # ============== bootc / ostree / systemd ==============
 CONFIG_EROFS_FS=m
@@ -358,3 +359,9 @@ CONFIG_NETFILTER_XT_MATCH_MULTIPORT=m
 CONFIG_IP_ADVANCED_ROUTER=y
 CONFIG_IP_MULTIPLE_TABLES=y
 CONFIG_WIREGUARD=m
+
+# ============== Cryptography/LUKS support (dm_crypt, hardware acceleration) ==============
+CONFIG_BLK_DEV_DM=y
+CONFIG_DM_CRYPT=y
+CONFIG_CRYPTO_XTS=y
+CONFIG_CRYPTO_USER_API_SKCIPHER=y
