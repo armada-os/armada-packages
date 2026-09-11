@@ -1,4 +1,4 @@
-use crate::{ChannelBackend, ColorCorrection, LightingBackend, MulticolorBackend};
+use crate::{ChannelBackend, ColorCorrection, LightingBackend, MulticolorBackend, UartBackend};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::env;
@@ -22,10 +22,12 @@ pub(crate) fn from_env() -> (PathBuf, LightingBackend) {
         .unwrap_or_else(|| DEVICE_ENV.into());
     let backend_override: Option<String> = env::var("ARMADA_RGB_BACKEND").ok();
     let targets_override: Option<String> = env::var("ARMADA_RGB_TARGETS").ok();
+    let device_override: Option<String> = env::var("ARMADA_RGB_DEVICE").ok();
+    let baud_override: Option<String> = env::var("ARMADA_RGB_BAUD").ok();
     let correction_override: Option<String> = env::var("ARMADA_RGB_CORRECTION").ok();
 
     let helper: Result<HashMap<String, String>> =
-        if backend_override.is_some() && targets_override.is_some() {
+        if backend_override.is_some() && (targets_override.is_some() || device_override.is_some()) {
             Ok(HashMap::new())
         } else {
             read_device_env(&device_env)
@@ -40,6 +42,13 @@ pub(crate) fn from_env() -> (PathBuf, LightingBackend) {
     let target_names: String = targets_override
         .or_else(|| values.get("ARMADA_RGB_TARGETS").cloned())
         .unwrap_or_default();
+    let device_name = device_override
+        .or_else(|| values.get("ARMADA_RGB_DEVICE").cloned())
+        .unwrap_or_default();
+    let baud_rate = baud_override
+        .or_else(|| values.get("ARMADA_RGB_BAUD").cloned())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(115_200);
     let targets: Vec<String> = target_names.split_whitespace().map(str::to_owned).collect();
     let correction: Option<ColorCorrection> = match correction_override
         .or_else(|| values.get("ARMADA_RGB_CORRECTION").cloned())
@@ -65,6 +74,10 @@ pub(crate) fn from_env() -> (PathBuf, LightingBackend) {
             MulticolorBackend::new(sysfs_root, targets).with_correction(correction),
         ),
         "multicolor" => LightingBackend::Unsupported("device profile has no RGB targets".into()),
+        "uart" if !device_name.is_empty() => LightingBackend::Uart(
+            UartBackend::new(PathBuf::from(device_name), baud_rate).with_correction(correction),
+        ),
+        "uart" => LightingBackend::Unsupported("device profile has no RGB device".into(),),
         "" => LightingBackend::Unsupported(
             helper_error.unwrap_or_else(|| "device profile has no RGB backend".into()),
         ),
@@ -88,9 +101,11 @@ fn read_device_env(path: &Path) -> Result<HashMap<String, String>> {
 }
 
 fn parse_device_env(output: &str) -> Result<HashMap<String, String>> {
-    const WANTED: [&str; 3] = [
+    const WANTED: [&str; 5] = [
         "ARMADA_RGB_BACKEND",
         "ARMADA_RGB_TARGETS",
+        "ARMADA_RGB_DEVICE",
+        "ARMADA_RGB_BAUD",
         "ARMADA_RGB_CORRECTION",
     ];
     let mut values: HashMap<String, String> = HashMap::new();
