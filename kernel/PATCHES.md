@@ -479,12 +479,10 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: armada
   upstream: local
   notes: Armada added this follow-up to limit `0612` to playback MI2S DAIs; without it, the ROCKNIX change would affect every playback DAI using the shared q6apm driver.
-- `0618-drm-msm-dp-dont-fail-audio-prepare-when-display-off.patch`
-  source: https://github.com/slaide/distribution/blob/06c1cdfdb0309c45ba7db34049b8aa4b16d20507/projects/ROCKNIX/devices/SM8750/patches/linux/0618-drm-msm-dp-dont-fail-audio-prepare-when-display-off.patch
-  upstream: local
-  notes: Armada modified this DP check to allow proper DP audio set up
-  when the DP display is not powered on to allow the sound card profile to be
-  set up.
+- `patches/0618-drm-msm-dp-dont-fail-audio-prepare-when-display-off.patch`
+  source: https://github.com/ROCKNIX/distribution/pull/3187
+  upstream: unknown
+  notes: Imported unchanged from the linked ROCKNIX pull request.
 - `dts/qcs8550-ayaneo-pocketace.dts`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/linux/dts/qcom/qcs8550-ayaneo-pocketace.dts
 - `dts/qcs8550-ayaneo-pocket-common.dtsi`
@@ -533,7 +531,7 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/linux/dts/qcom/sm8750-konkr-pf-elite.dts
 - `dts/sm8750-konkr-pf-elite.dts.patch`
   source: armada
-  notes: Armada adapts the Elite touchscreen node to the full ROCKNIX Chipone fork shared with the SM8650 Pocket FIT and keeps volume-up from waking the system; the driver is selected only by those two device-tree nodes.
+  notes: Armada adapts the Elite touchscreen node to the full ROCKNIX Chipone fork shared with the SM8650 Pocket FIT, keeps volume-up from waking the system, and adds the DisplayPort playback link required for USB-C DP Alt Mode audio; the touchscreen driver is selected only by those two device-tree nodes.
 - `dts/cq8725s-ayn-common.dtsi`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0046-arm64-dts-qcom-Add-AYN-CQ8725S-Common.patch
   notes: Armada extracted this DTS from the cited ROCKNIX patch and then applied later ROCKNIX DTS updates, including the Odin 3 haptics nodes from ROCKNIX commit `81a31e3d0f`.
