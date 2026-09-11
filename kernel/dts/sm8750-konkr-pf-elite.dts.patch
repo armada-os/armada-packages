@@ -57,7 +57,7 @@ index eba9f43..5bb5f29 100644
  		pinctrl-names = "default", "sleep";
  		pinctrl-0 = <&ts_int_default>;
  		pinctrl-1 = <&ts_int_sleep>;
-@@ -1517,6 +1510,19 @@
+@@ -1517,6 +1510,18 @@
  			cpu { sound-dai = <&q6apmbedai TX_CODEC_DMA_TX_3>; };
  			platform { sound-dai = <&q6apm>; };
  		};
