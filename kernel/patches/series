@@ -7,6 +7,8 @@
 0010-msm-resource-cleanup.patch
 0048-drm-msm-dsi-reparent-byte-pixel-src-to-xo-on-disable.patch
 0049-drm-msm-dpu-panel-opt-in-8bpc-dither.patch
+0066-drm-msm-dpu-enable-inline-rotation.patch
+0067-drm-msm-dpu-enable-qseed-detail-enhancer.patch
 0016-rp5-smooth-brightness-adjustment.patch
 0056_Xm-Plus-XM91080G-panel.patch
 0028-drm-panel-Add-panel-driver-for-Chipone-ICNA35XX-base.patch
