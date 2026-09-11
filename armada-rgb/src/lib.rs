@@ -7,7 +7,7 @@ mod correction;
 mod runtime;
 mod state;
 
-pub use backend::{ChannelBackend, LightingBackend, MulticolorBackend};
+pub use backend::{ChannelBackend, LightingBackend, MulticolorBackend, UartBackend};
 pub use controller::Controller;
 pub use correction::ColorCorrection;
 pub use state::LightingConfig;
