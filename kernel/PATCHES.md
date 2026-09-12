@@ -30,6 +30,15 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0067-drm-msm-dpu-enable-qseed-detail-enhancer.patch`
   source: https://github.com/ROCKNIX/distribution/blob/60bb58c1db053255b700f3953b72d619ec5aa85d/projects/ROCKNIX/devices/SM8550/patches/linux/0067-drm-msm-dpu-enable-qseed-detail-enhancer.patch
   upstream: unknown
+- `patches/0068-drm-msm-dpu-lutdma-dspp-igc-gamut.patch`
+  source: armada
+  upstream: local
+- `patches/0069-dt-bindings-display-msm-dpu-lutdma-reg.patch`
+  source: armada
+  upstream: local
+- `patches/0070-arm64-dts-qcom-dpu-lutdma-reg.patch`
+  source: armada
+  upstream: local
 - `patches/0016-rp5-smooth-brightness-adjustment.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8250/patches/linux/0016-rp5-smooth-brightness-adjustment.patch
   upstream: unknown
