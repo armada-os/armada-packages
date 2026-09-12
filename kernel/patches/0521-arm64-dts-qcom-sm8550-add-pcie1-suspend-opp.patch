@@ -1,0 +1,37 @@
+From: Armada:EVO <noreply@armada.local>
+Subject: [PATCH] arm64: dts: qcom: sm8550: add PCIe1 suspend OPP
+
+The AYANEO Pocket family enables PCIe1 for its Renesas uPD720201 USB
+host. Give that controller the same 1000 kBps suspend-only DDR/LLCC
+floor as PCIe0. Without an opp-suspend entry, the common Qualcomm PCIe
+s2idle path drops PCIe1's OPP to NULL; after cluster collapse the AOP
+can fail to return control.
+
+The synthetic frequency and omitted opp-level keep this OPP out of
+active link-speed matching. The upstream D3cold and generic PCI power
+control paths still power down the link, PHY, endpoint, and modeled
+Renesas supplies; this entry retains only the SM8550 wake contract.
+
+---
+--- a/arch/arm64/boot/dts/qcom/sm8550.dtsi
++++ b/arch/arm64/boot/dts/qcom/sm8550.dtsi
+@@ -2642,6 +2642,19 @@
+ 					required-opps = <&rpmhpd_opp_nom>;
+ 					opp-peak-kBps = <3938000 1>;
+ 					opp-level = <4>;
++				};
++
++				/*
++				 * Suspend-only DDR/LLCC floor for Pocket-family boards
++				 * that enable PCIe1 for the discrete Renesas USB host.
++				 * The synthetic frequency and absent opp-level prevent
++				 * active-link selection.
++				 */
++				opp-suspend-1 {
++					opp-hz = /bits/ 64 <1>;
++					required-opps = <&rpmhpd_opp_min_svs>;
++					opp-peak-kBps = <1000 1>;
++					opp-suspend;
+ 				};
+ 			};
+ 
