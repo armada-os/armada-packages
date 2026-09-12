@@ -1,0 +1,48 @@
+From: Mukesh Ojha <mukesh.ojha@oss.qualcomm.com>
+Date: Wed, 9 Sep 2026 16:20:48 +0530
+Subject: [PATCH v3 2/3] dt-bindings: remoteproc: qcom,sm8550-pas: make qcom,hawi-cdsp-pas standalone
+
+Hawi was initially introduced as a fallback compatible alongside
+qcom,sm8550-cdsp-pas on the assumption of hardware-level compatibility.
+Bringup revealed that the NSP proxy power domain on Hawi requires a
+specific RPMH performance level that the sm8550 driver data does not
+provide, breaking the compatibility contract the fallback string implies.
+
+Remove qcom,hawi-cdsp-pas from the sm8550-cdsp-pas fallback items block,
+add it to the standalone compatible enum, and extend the existing
+cx/mxc/nsp power-domain constraint to cover it explicitly.
+
+Reviewed-by: Krzysztof Kozlowski <krzysztof.kozlowski@oss.qualcomm.com>
+Signed-off-by: Mukesh Ojha <mukesh.ojha@oss.qualcomm.com>
+---
+ .../devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml        | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml b/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml
+index c58e8a6c7fe1..cf57095cd49d 100644
+--- a/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml
++++ b/Documentation/devicetree/bindings/remoteproc/qcom,sm8550-pas.yaml
+@@ -18,6 +18,7 @@ properties:
+     oneOf:
+       - enum:
+           - qcom,eliza-cdsp-pas
++          - qcom,hawi-cdsp-pas
+           - qcom,sdx75-mpss-pas
+           - qcom,sm8550-adsp-pas
+           - qcom,sm8550-cdsp-pas
+@@ -40,7 +41,6 @@ properties:
+       - items:
+           - enum:
+               - qcom,glymur-cdsp-pas
+-              - qcom,hawi-cdsp-pas
+               - qcom,kaanapali-cdsp-pas
+               - qcom,maili-cdsp-pas
+           - const: qcom,sm8550-cdsp-pas
+@@ -273,6 +273,7 @@ allOf:
+         compatible:
+           contains:
+             enum:
++              - qcom,hawi-cdsp-pas
+               - qcom,sm8550-cdsp-pas
+               - qcom,sm8650-cdsp-pas
+               - qcom,x1e80100-cdsp-pas
