@@ -18,6 +18,7 @@ Source0:        %{forgeurl}/archive/%{commit}/%{name}-%{commit}.tar.gz
 Patch1:         0001-fix-gamepad-honor-passthrough-config-skip-exclusive-grab.patch
 Patch2:         0002-fix-force-feedback-reset-effects-when-replacing-targets.patch
 Patch3:         0003-feat-Hardware-Support-Add-AYANEO-Pocket-DS.patch
+Patch4:         0004-feat-Hardware-Support-Add-AYN-Thor-Lite.patch
 
 BuildRequires:  cargo
 BuildRequires:  rust
