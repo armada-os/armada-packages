@@ -130,17 +130,33 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  static struct dpu_kms *_dpu_crtc_get_kms(struct drm_crtc *crtc)
  {
  	struct msm_drm_private *priv = crtc->dev->dev_private;
-@@ -853,7 +860,8 @@
+@@ -844,6 +851,8 @@
+ 	gc_lut->flags = 0;
+ }
+ 
++#define DPU_CP_BLOCKS_RETRIES	8
++
+ static void _dpu_crtc_setup_cp_blocks(struct drm_crtc *crtc)
+ {
+ 	struct drm_crtc_state *state = crtc->state;
+@@ -853,10 +862,14 @@
  	struct dpu_hw_gc_lut *gc_lut;
  	struct dpu_hw_ctl *ctl;
  	struct dpu_hw_dspp *dspp;
 -	int i;
++	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
 +	unsigned long sb_ctls = 0;
++	bool fresh, retry = false;
 +	int i, ret;
  
  
- 	if (!state->color_mgmt_changed && !drm_atomic_crtc_needs_modeset(state))
-@@ -884,17 +892,66 @@
+-	if (!state->color_mgmt_changed && !drm_atomic_crtc_needs_modeset(state))
++	fresh = state->color_mgmt_changed || drm_atomic_crtc_needs_modeset(state);
++	if (!fresh && !dpu_crtc->cp_blocks_retries)
+ 		return;
+ 
+ 	for (i = 0; i < cstate->num_mixers; i++) {
+@@ -884,18 +897,80 @@
  				dspp->ops.setup_gc(dspp, NULL);
  			} else {
  				gc_lut = kzalloc_obj(*gc_lut);
@@ -165,6 +181,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
 +			ret = dpu_hw_dspp_reg_dma_wait(dspp, ctl->idx);
 +			if (ret) {
 +				DPU_ERROR("dspp %d LUT update skipped: %d\n", dspp->idx, ret);
++				retry = true;
 +				continue;
 +			}
 +		}
@@ -175,6 +192,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
 +						    ctl->idx);
 +			if (ret) {
 +				DPU_ERROR("dspp %d gamut setup failed: %d\n", dspp->idx, ret);
++				retry = true;
 +			} else {
 +				ctl->ops.update_pending_flush_dspp(ctl, dspp->idx, DPU_DSPP_GAMUT);
 +				ctl->ops.update_pending_flush_dspp(ctl, dspp->idx, DPU_DSPP_SB);
@@ -189,6 +207,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
 +						  ctl->idx);
 +			if (ret) {
 +				DPU_ERROR("dspp %d igc setup failed: %d\n", dspp->idx, ret);
++				retry = true;
 +				continue;
 +			}
 +
@@ -196,23 +215,34 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
 +			ctl->ops.update_pending_flush_dspp(ctl, dspp->idx, DPU_DSPP_SB);
 +			sb_ctls |= BIT(ctl->idx);
 +		}
-+	}
+ 	}
 +
 +	/* one last-command per CTL closes its sideband queue for this frame */
 +	for_each_set_bit(i, &sb_ctls, CTL_MAX) {
 +		for (int m = 0; m < cstate->num_mixers; m++) {
 +			if (mixer[m].lm_ctl->idx == i && mixer[m].hw_dspp) {
 +				ret = dpu_reg_dma_last_cmd_sb(mixer[m].hw_dspp->reg_dma, i);
-+				if (ret)
++				if (ret) {
 +					DPU_ERROR("ctl %d lutdma last command failed: %d\n",
 +						  i, ret);
++					retry = true;
++				}
 +				break;
 +			}
 +		}
- 	}
++	}
++
++	/* a wedged engine must not pay the wait timeout on every frame */
++	if (!retry)
++		dpu_crtc->cp_blocks_retries = 0;
++	else if (fresh)
++		dpu_crtc->cp_blocks_retries = DPU_CP_BLOCKS_RETRIES;
++	else
++		dpu_crtc->cp_blocks_retries--;
  }
  
-@@ -1011,6 +1068,7 @@
+ static void dpu_crtc_atomic_begin(struct drm_crtc *crtc,
+@@ -1011,6 +1086,7 @@
  	DRM_DEBUG_ATOMIC("crtc%d\n", crtc->base.id);
  
  	__drm_atomic_helper_crtc_destroy_state(state);
@@ -220,7 +250,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  
  	kfree(cstate);
  }
-@@ -1169,10 +1227,46 @@
+@@ -1169,10 +1245,46 @@
  
  	/* duplicate base helper */
  	__drm_atomic_helper_crtc_duplicate_state(crtc, &cstate->base);
@@ -267,7 +297,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  static void dpu_crtc_atomic_print_state(struct drm_printer *p,
  					const struct drm_crtc_state *state)
  {
-@@ -1423,7 +1517,7 @@
+@@ -1423,7 +1535,7 @@
  	else
  		topology.num_lm = 1;
  
@@ -276,7 +306,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  		topology.num_dspp = topology.num_lm;
  
  	return topology;
-@@ -1488,8 +1582,8 @@
+@@ -1488,8 +1600,8 @@
  
  		cstate->mixers[i].hw_lm = to_dpu_hw_mixer(hw_lm[i]);
  		cstate->mixers[i].lm_ctl = to_dpu_hw_ctl(hw_ctl[ctl_idx]);
@@ -287,7 +317,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  	}
  
  	cstate->num_mixers = num_lm;
-@@ -1524,6 +1618,38 @@
+@@ -1524,6 +1636,38 @@
  	    (!clone_mode_requested && clone_mode_enabled))
  		new_crtc_state->mode_changed = true;
  
@@ -326,7 +356,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  	return 0;
  }
  
-@@ -1542,14 +1668,31 @@
+@@ -1542,14 +1686,31 @@
  
  	bool needs_dirtyfb = dpu_crtc_needs_dirtyfb(crtc_state);
  
@@ -361,7 +391,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  	if (crtc_state->planes_changed || crtc_state->zpos_changed) {
  		if (dpu_use_virtual_planes)
  			rc = dpu_crtc_reassign_planes(crtc, crtc_state);
-@@ -1854,6 +1997,8 @@
+@@ -1854,6 +2015,8 @@
  	.reset = dpu_crtc_reset,
  	.atomic_duplicate_state = dpu_crtc_duplicate_state,
  	.atomic_destroy_state = dpu_crtc_destroy_state,
@@ -370,7 +400,7 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
  	.atomic_print_state = dpu_crtc_atomic_print_state,
  	.late_register = dpu_crtc_late_register,
  	.verify_crc_source = dpu_crtc_verify_crc_source,
-@@ -1922,12 +2067,23 @@
+@@ -1922,12 +2085,23 @@
  
  	if (dpu_kms->catalog->dspp_count) {
  		const struct dpu_dspp_cfg *dspp = &dpu_kms->catalog->dspp[0];
@@ -399,15 +429,18 @@ diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c b/drivers/gpu/drm/msm/disp/
 diff -ruN a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h
 --- a/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h
 +++ b/drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.h
-@@ -156,6 +156,7 @@
+@@ -156,6 +156,10 @@
  struct dpu_crtc {
  	struct drm_crtc base;
  	char name[DPU_CRTC_NAME_SIZE];
 +	struct drm_property *lut3d_property;
++
++	/* flushes left to reprogram color after a LUTDMA wait or setup failure */
++	u8 cp_blocks_retries;
  
  	struct drm_pending_vblank_event *event;
  	u32 vsync_count;
-@@ -225,6 +226,16 @@
+@@ -225,6 +229,16 @@
  
  	enum dpu_crtc_crc_source crc_source;
  	int crc_frame_skip_count;
