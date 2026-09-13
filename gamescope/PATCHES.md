@@ -38,3 +38,9 @@ to a commit, or `armada` if it's original; a URL source with no `notes` is verba
   source: armada
 - `patches/0017-drm-let-a-socket-lease-holder-yield-to-protocol-clients.patch`
   source: armada
+- `patches/0018-drm-sdr-color-management-through-dpu-output-luts.patch`
+  source: armada
+- `patches/0019-steamcompmgr-arm64-virtual-white.patch`
+  source: armada
+- `patches/0020-color-p3-red-is-wide-gamut.patch`
+  source: armada
