@@ -8,7 +8,7 @@ no HDR) and feed it through the existing parser. Physical EDIDs stay
 preferred and unchanged; the synthetic EDID is never committed to KMS.
 
 diff --git a/src/Backends/DRMBackend.cpp b/src/Backends/DRMBackend.cpp
-index d48e6a4c..919f7005 100644
+index 5709410..10dd00e 100644
 --- a/src/Backends/DRMBackend.cpp
 +++ b/src/Backends/DRMBackend.cpp
 @@ -417,6 +417,7 @@ namespace gamescope
@@ -96,7 +96,7 @@ index d48e6a4c..919f7005 100644
  		di_info *pInfo = di_info_parse_edid( m_Mutable.EdidData.data(), m_Mutable.EdidData.size() );
  		if ( !pInfo )
 diff --git a/src/edid.cpp b/src/edid.cpp
-index 62158293..4ecd80b1 100644
+index 6215829..81239da 100644
 --- a/src/edid.cpp
 +++ b/src/edid.cpp
 @@ -4,8 +4,10 @@
@@ -110,7 +110,7 @@ index 62158293..4ecd80b1 100644
  #include <cstring>
  #include <cstdlib>
  
-@@ -355,4 +357,112 @@ namespace gamescope
+@@ -355,4 +357,109 @@ namespace gamescope
  
          return edid;
      }
@@ -135,16 +135,15 @@ index 62158293..4ecd80b1 100644
 +
 +        const uint32_t hblank = mode.htotal - mode.hdisplay;
 +        const uint32_t vblank = mode.vtotal - mode.vdisplay;
-+        const uint32_t hsyncOffset = mode.hsyncStart - mode.hdisplay;
-+        const uint32_t hsyncWidth = mode.hsyncEnd - mode.hsyncStart;
-+        const uint32_t vsyncOffset = mode.vsyncStart - mode.vdisplay;
-+        const uint32_t vsyncWidth = mode.vsyncEnd - mode.vsyncStart;
-+        if ( !hblank || hblank > 4095 || !vblank || vblank > 4095 ||
-+             hsyncOffset > 1023 || !hsyncWidth || hsyncWidth > 1023 ||
-+             vsyncOffset > 63 || !vsyncWidth || vsyncWidth > 63 )
-+        {
++        if ( !hblank || hblank > 4095 || !vblank || vblank > 4095 )
 +            return {};
-+        }
++
++        // These fields only describe timing to EDID readers; the mode comes from the
++        // kernel. A large front porch (ICNA3512: 412 lines) overflows the DTD, so clamp.
++        const uint32_t hsyncOffset = std::min<uint32_t>( mode.hsyncStart - mode.hdisplay, 1023 );
++        const uint32_t hsyncWidth = std::clamp<uint32_t>( mode.hsyncEnd - mode.hsyncStart, 1, 1023 );
++        const uint32_t vsyncOffset = std::min<uint32_t>( mode.vsyncStart - mode.vdisplay, 63 );
++        const uint32_t vsyncWidth = std::clamp<uint32_t>( mode.vsyncEnd - mode.vsyncStart, 1, 63 );
 +
 +        const uint32_t pixelClock10KHz = ( mode.clockKHz + 5 ) / 10;
 +        if ( !pixelClock10KHz || pixelClock10KHz > UINT16_MAX )
@@ -164,11 +163,11 @@ index 62158293..4ecd80b1 100644
 +        dtd[7] = ( ( mode.vdisplay >> 8 ) << 4 ) | ( vblank >> 8 );
 +        dtd[8] = hsyncOffset & 0xff;
 +        dtd[9] = hsyncWidth & 0xff;
-+        dtd[10] = ( ( hsyncOffset >> 8 ) << 6 ) |
++        dtd[10] = ( ( vsyncOffset & 0xf ) << 4 ) | ( vsyncWidth & 0xf );
++        dtd[11] = ( ( hsyncOffset >> 8 ) << 6 ) |
 +                  ( ( hsyncWidth >> 8 ) << 4 ) |
 +                  ( ( vsyncOffset >> 4 ) << 2 ) |
 +                    ( vsyncWidth >> 4 );
-+        dtd[11] = ( ( vsyncOffset & 0xf ) << 4 ) | ( vsyncWidth & 0xf );
 +        dtd[12] = widthMm & 0xff;
 +        dtd[13] = heightMm & 0xff;
 +        dtd[14] = ( ( widthMm >> 8 ) << 4 ) | ( heightMm >> 8 );
@@ -201,10 +200,8 @@ index 62158293..4ecd80b1 100644
 +        edid[0x21] = wx >> 2;
 +        edid[0x22] = wy >> 2;
 +
-+        // The template's range limits descriptor (45-90Hz) contradicts the
-+        // real mode, so blank it to a dummy descriptor. That also requires
-+        // clearing the continuous-frequency feature bit, which mandates a
-+        // range limits descriptor.
++        // The template's 45-90Hz range limits contradict the real mode; blanking it
++        // also requires clearing the continuous-frequency bit, which mandates one.
 +        edid[0x18] &= ~0x01;
 +        uint8_t *dummyDescriptor = &edid[0x5a];
 +        std::fill( dummyDescriptor, dummyDescriptor + EDID_BYTE_DESCRIPTOR_SIZE, 0 );
@@ -224,7 +221,7 @@ index 62158293..4ecd80b1 100644
 +    }
  }
 diff --git a/src/edid.h b/src/edid.h
-index d0ed88f4..0cc7e74a 100644
+index d0ed88f..0cc7e74 100644
 --- a/src/edid.h
 +++ b/src/edid.h
 @@ -9,9 +9,27 @@ namespace gamescope
@@ -282,10 +279,10 @@ index e2667ea..6ad2413 100644
  
 diff --git a/tests/test_edid.cpp b/tests/test_edid.cpp
 new file mode 100644
-index 00000000..144111ec
+index 0000000..379c33d
 --- /dev/null
 +++ b/tests/test_edid.cpp
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,178 @@
 +#include <catch2/catch_test_macros.hpp>
 +
 +#include "edid.h"
@@ -416,9 +413,51 @@ index 00000000..144111ec
 +    mode = k_Odin3Mode;
 +    mode.htotal = mode.hdisplay;
 +    REQUIRE( GenerateSimpleEdid( mode ).empty() );
++}
++
++TEST_CASE("Synthetic EDID clamps sync porches it cannot describe", "[edid]")
++{
++    EdidModeInfo mode = k_Odin3Mode;
++    mode.vsyncStart = mode.vdisplay + 412;
++    mode.vsyncEnd = mode.vsyncStart + 4;
++    mode.vtotal = mode.vsyncEnd + 8;
++
++    std::vector<uint8_t> edid = GenerateSimpleEdid( mode );
++    REQUIRE( edid.size() == 256 );
++
++    const uint8_t *dtd = &edid[0x36];
++    uint32_t vsyncOffset = ( ( dtd[10] >> 4 ) & 0xf ) | ( ( ( dtd[11] >> 2 ) & 0x3 ) << 4 );
++    uint32_t vsyncWidth  = ( dtd[10] & 0xf ) | ( ( dtd[11] & 0x3 ) << 4 );
++    CHECK( vsyncOffset == 63 );
++    CHECK( vsyncWidth == 4 );
++
++    di_info *info = di_info_parse_edid( edid.data(), edid.size() );
++    REQUIRE( info != nullptr );
++    di_info_destroy( info );
 +
 +    mode = k_Odin3Mode;
 +    mode.vsyncEnd = mode.vsyncStart + 64;
 +    mode.vtotal = mode.vsyncEnd + 1;
-+    REQUIRE( GenerateSimpleEdid( mode ).empty() );
++    edid = GenerateSimpleEdid( mode );
++    REQUIRE( edid.size() == 256 );
++    dtd = &edid[0x36];
++    vsyncWidth = ( dtd[10] & 0xf ) | ( ( dtd[11] & 0x3 ) << 4 );
++    CHECK( vsyncWidth == 63 );
++}
++
++TEST_CASE("Synthetic EDID encodes sync timings in the correct DTD bytes", "[edid]")
++{
++    const std::vector<uint8_t> edid = GenerateSimpleEdid( k_Odin3Mode );
++    REQUIRE( edid.size() == 256 );
++
++    const uint8_t *dtd = &edid[0x36];
++    const uint32_t hsyncOffset = dtd[8] | ( ( dtd[11] >> 6 ) << 8 );
++    const uint32_t hsyncWidth  = dtd[9] | ( ( ( dtd[11] >> 4 ) & 0x3 ) << 8 );
++    const uint32_t vsyncOffset = ( ( dtd[10] >> 4 ) & 0xf ) | ( ( ( dtd[11] >> 2 ) & 0x3 ) << 4 );
++    const uint32_t vsyncWidth  = ( dtd[10] & 0xf ) | ( ( dtd[11] & 0x3 ) << 4 );
++
++    CHECK( hsyncOffset == k_Odin3Mode.hsyncStart - k_Odin3Mode.hdisplay );
++    CHECK( hsyncWidth  == k_Odin3Mode.hsyncEnd - k_Odin3Mode.hsyncStart );
++    CHECK( vsyncOffset == k_Odin3Mode.vsyncStart - k_Odin3Mode.vdisplay );
++    CHECK( vsyncWidth  == k_Odin3Mode.vsyncEnd - k_Odin3Mode.vsyncStart );
 +}
