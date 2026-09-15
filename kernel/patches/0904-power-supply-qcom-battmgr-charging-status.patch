@@ -1,0 +1,59 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: qcom_battmgr: report charging while HL7139 direct charge is active
+
+During direct charging the HL7139 charge pumps feed the battery
+directly and the Qualcomm PMIC buck is quiesced to 13 mA. The
+battery-manager firmware only tracks its own charger, so it reports
+the battery as Discharging even while the pumps push ~4.8 A into the
+cell. UPower/SteamOS then shows the wrong icon.
+
+When the firmware reports the battery is not charging via the PMIC
+path, consult the HL7139 pump supplies: if either is online, report
+the battery as Charging. On devices without the pumps the lookup
+finds nothing and behavior is unchanged.
+
+Signed-off-by: Armada <noreply@armada.local>
+---
+ drivers/power/supply/qcom_battmgr.c | 31 ++++++++++++++++++++++++++++++
+ 1 file changed, 31 insertions(+)
+
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -533,6 +533,37 @@
+ 
+ 	switch (psp) {
+ 	case POWER_SUPPLY_PROP_STATUS:
++		/*
++		 * During direct charging the HL7139 charge pumps feed the
++		 * battery and the Qualcomm buck is quiesced to 13 mA. The
++		 * battery-manager firmware only tracks its own buck, so it
++		 * reports DISCHARGING even while the pumps push current into
++		 * the cell. If either pump supply is online, the battery is
++		 * charging by definition.
++		 */
++		if (battmgr->status.status != POWER_SUPPLY_STATUS_CHARGING) {
++			static const char * const pump_names[] = {
++				"hl7139-master", "hl7139-slave",
++			};
++			struct power_supply *pump;
++			union power_supply_propval pval;
++			int i;
++
++			for (i = 0; i < ARRAY_SIZE(pump_names); i++) {
++				pump = power_supply_get_by_name(pump_names[i]);
++				if (!pump)
++					continue;
++				if (!power_supply_get_property(pump,
++							      POWER_SUPPLY_PROP_ONLINE,
++							      &pval) &&
++				    pval.intval) {
++					power_supply_put(pump);
++					val->intval = POWER_SUPPLY_STATUS_CHARGING;
++					return 0;
++				}
++				power_supply_put(pump);
++			}
++		}
+ 		val->intval = battmgr->status.status;
+ 		break;
+ 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
