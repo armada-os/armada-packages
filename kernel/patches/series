@@ -52,6 +52,7 @@
 0059_AYN-Odin2-Mini--hynitron--cstxxx.patch
 0060-input-touchscreen-add-synaptics-dsx-kconfig.patch
 0060-input-touchscreen-add-synaptics-dsx-driver.patch
+0060a-input-synaptics-dsx-follow-display-panel-power-lifecycle.patch
 
 # ============== Input / Gamepad ==============
 0058-input-joystick-add-ayaneo-mcu-joystick.patch
