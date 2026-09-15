@@ -1,5 +1,5 @@
 From: Armada <noreply@armada.local>
-Subject: [PATCH] arm64: dts: qcom: pocketace: wire the SY7758 enable GPIO
+Subject: [PATCH] arm64: dts: qcom: pocketace: wire display peripherals
 
 --- a/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketace.dts
 +++ b/arch/arm64/boot/dts/qcom/qcs8550-ayaneo-pocketace.dts
@@ -15,3 +15,5 @@ Subject: [PATCH] arm64: dts: qcom: pocketace: wire the SY7758 enable GPIO
  		status = "okay";
  	};
  };
+@@ -94,0 +95 @@
++		panel = <&display_panel>;

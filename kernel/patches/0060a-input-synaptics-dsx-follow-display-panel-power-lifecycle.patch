@@ -1,0 +1,653 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] input: synaptics_dsx: follow display panel power lifecycle
+
+The Pocket ACE display panel removes power from its integrated Synaptics
+touch controller before the touchscreen device PM callback runs. A late
+I2C sleep command then fails and can abort suspend.
+
+Follow the associated DRM panel so the controller sleeps before panel
+power is removed and wakes after it is restored. Keep device PM
+bus-silent in this mode, serialize reset and PM state transitions, and
+use bounded delayed recovery for transient resume failures. Also retain
+transport errors from the I2C helpers instead of collapsing them.
+
+---
+diff --git a/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.c b/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.c
+index 078b85e..0a2464b 100644
+--- a/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.c
++++ b/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.c
+@@ -54,6 +54,9 @@
+ 
+ #define CHECK_STATUS_TIMEOUT_MS 100
+ 
++#define SYNAPTICS_RMI4_RESUME_RETRY_MS 250
++#define SYNAPTICS_RMI4_RESUME_MAX_RETRIES 5
++
+ #define F01_STD_QUERY_LEN 21
+ #define F01_BUID_ID_OFFSET 18
+ 
+@@ -81,6 +84,20 @@ static int synaptics_rmi4_reset_device(struct synaptics_rmi4_data *rmi4_data,
+ 
+ static int synaptics_rmi4_suspend(struct device *dev);
+ static int synaptics_rmi4_resume(struct device *dev);
++#ifdef CONFIG_PM
++static void synaptics_rmi4_resume_work(struct work_struct *work);
++static int synaptics_rmi4_do_suspend(struct synaptics_rmi4_data *rmi4_data);
++static int synaptics_rmi4_do_panel_unprepare(
++		struct synaptics_rmi4_data *rmi4_data);
++static int synaptics_rmi4_do_resume(struct synaptics_rmi4_data *rmi4_data);
++static int synaptics_rmi4_panel_prepared(struct drm_panel_follower *follower);
++static int synaptics_rmi4_panel_unpreparing(
++		struct drm_panel_follower *follower);
++static const struct drm_panel_follower_funcs synaptics_rmi4_panel_funcs = {
++	.panel_prepared = synaptics_rmi4_panel_prepared,
++	.panel_unpreparing = synaptics_rmi4_panel_unpreparing,
++};
++#endif
+ 
+ static ssize_t synaptics_rmi4_f01_reset_store(struct device *dev,
+ 		struct device_attribute *attr, const char *buf, size_t count);
+@@ -631,10 +646,12 @@ static void synaptics_rmi4_polling_work(struct work_struct *work)
+ 			container_of(to_delayed_work(work),
+ 			struct synaptics_rmi4_data, polling_work);
+ 
+-	if (!rmi4_data->suspend)
++	if (rmi4_data->irq_enabled && !rmi4_data->suspend &&
++			!rmi4_data->sensor_sleep)
+ 		synaptics_rmi4_sensor_report(rmi4_data, true);
+ 
+-	if (!rmi4_data->suspend)
++	if (rmi4_data->irq_enabled && !rmi4_data->suspend &&
++			!rmi4_data->sensor_sleep)
+ 		schedule_delayed_work(&rmi4_data->polling_work,
+ 				msecs_to_jiffies(16));
+ }
+@@ -695,19 +712,16 @@ static int synaptics_rmi4_irq_enable(struct synaptics_rmi4_data *rmi4_data,
+ 		/* Process and clear interrupts */
+ 		synaptics_rmi4_sensor_report(rmi4_data, false);
+ 
+-		schedule_delayed_work(&rmi4_data->polling_work,
+-				msecs_to_jiffies(3000));
+-
+ 		retval = synaptics_rmi4_int_enable(rmi4_data, true);
+ 		if (retval < 0)
+ 			return retval;
+ 
+ 		rmi4_data->irq_enabled = true;
++		schedule_delayed_work(&rmi4_data->polling_work,
++				msecs_to_jiffies(3000));
+ 	} else {
+-		if (rmi4_data->irq_enabled) {
+-			cancel_delayed_work_sync(&rmi4_data->polling_work);
+-			rmi4_data->irq_enabled = false;
+-		}
++		rmi4_data->irq_enabled = false;
++		cancel_delayed_work_sync(&rmi4_data->polling_work);
+ 	}
+ 
+ 	return retval;
+@@ -1608,11 +1622,17 @@ exit:
+ static int synaptics_rmi4_reset_device(struct synaptics_rmi4_data *rmi4_data,
+ 		bool rebuild __maybe_unused)
+ {
++	int enable_ret;
+ 	int retval;
+ 
+-	mutex_lock(&(rmi4_data->rmi4_reset_mutex));
+-
++#ifdef CONFIG_PM
++	WRITE_ONCE(rmi4_data->resume_pending, false);
++	cancel_delayed_work_sync(&rmi4_data->resume_work);
++#endif
++	/* Cancellation must happen before taking the mutex used by recovery. */
++	mutex_lock(&rmi4_data->rmi4_state_mutex);
+ 	synaptics_rmi4_irq_enable(rmi4_data, false, false);
++	mutex_lock(&(rmi4_data->rmi4_reset_mutex));
+ 
+ 	retval = synaptics_rmi4_sw_reset(rmi4_data);
+ 	if (retval < 0) {
+@@ -1621,9 +1641,9 @@ static int synaptics_rmi4_reset_device(struct synaptics_rmi4_data *rmi4_data,
+ 				__func__);
+ 		goto exit;
+ 	}
++	rmi4_data->sensor_sleep = false;
+ 
+ 	synaptics_rmi4_free_fingers(rmi4_data);
+-
+ 	synaptics_rmi4_empty_fn_list(rmi4_data);
+ 
+ 	retval = synaptics_rmi4_query_device(rmi4_data);
+@@ -1637,10 +1657,18 @@ static int synaptics_rmi4_reset_device(struct synaptics_rmi4_data *rmi4_data,
+ 	retval = 0;
+ 
+ exit:
+-	synaptics_rmi4_irq_enable(rmi4_data, true, false);
+-
+ 	mutex_unlock(&(rmi4_data->rmi4_reset_mutex));
+ 
++	enable_ret = synaptics_rmi4_irq_enable(rmi4_data, true, false);
++	if (enable_ret < 0) {
++		dev_err(rmi4_data->pdev->dev.parent,
++				"%s: Failed to restore polling, error = %d\n",
++				__func__, enable_ret);
++		if (retval == 0)
++			retval = enable_ret;
++	}
++	mutex_unlock(&rmi4_data->rmi4_state_mutex);
++
+ 	return retval;
+ }
+ 
+@@ -1686,6 +1714,7 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
+ 	rmi4_data->reset_device = synaptics_rmi4_reset_device;
+ 	rmi4_data->irq_enable = synaptics_rmi4_irq_enable;
+ 
++	mutex_init(&(rmi4_data->rmi4_state_mutex));
+ 	mutex_init(&(rmi4_data->rmi4_reset_mutex));
+ 	mutex_init(&(rmi4_data->rmi4_report_mutex));
+ 	mutex_init(&(rmi4_data->rmi4_io_ctrl_mutex));
+@@ -1739,6 +1768,9 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
+ 	/* Use polling mode for TDDI chips where ATTN line is not driven */
+ 	rmi4_data->polling_mode = true;
+ 	INIT_DELAYED_WORK(&rmi4_data->polling_work, synaptics_rmi4_polling_work);
++#ifdef CONFIG_PM
++	INIT_DELAYED_WORK(&rmi4_data->resume_work, synaptics_rmi4_resume_work);
++#endif
+ 
+ 	retval = synaptics_rmi4_irq_enable(rmi4_data, true, false);
+ 	if (retval < 0) {
+@@ -1759,10 +1791,26 @@ static int synaptics_rmi4_probe(struct platform_device *pdev)
+ 		}
+ 	}
+ 
++#ifdef CONFIG_PM
++	if (drm_is_panel_follower(rmi4_data->pdev->dev.parent)) {
++		rmi4_data->panel_follower.funcs = &synaptics_rmi4_panel_funcs;
++		rmi4_data->follows_panel = true;
++		retval = drm_panel_add_follower(rmi4_data->pdev->dev.parent,
++				&rmi4_data->panel_follower);
++		if (retval < 0) {
++			rmi4_data->follows_panel = false;
++			dev_err(&pdev->dev,
++					"%s: Failed to follow display panel, error = %d\n",
++					__func__, retval);
++			goto err_sysfs;
++		}
++	}
++#endif
++
+ 	return retval;
+ 
+ err_sysfs:
+-	for (attr_count--; attr_count >= 0; attr_count--) {
++	while (attr_count--) {
+ 		sysfs_remove_file(&rmi4_data->input_dev->dev.kobj,
+ 				&attrs[attr_count].attr);
+ 	}
+@@ -1770,6 +1818,10 @@ err_sysfs:
+ 	synaptics_rmi4_irq_enable(rmi4_data, false, false);
+ 
+ err_enable_irq:
++#ifdef CONFIG_PM
++	WRITE_ONCE(rmi4_data->resume_pending, false);
++	cancel_delayed_work_sync(&rmi4_data->resume_work);
++#endif
+ 	synaptics_rmi4_empty_fn_list(rmi4_data);
+ 	input_unregister_device(rmi4_data->input_dev);
+ 	rmi4_data->input_dev = NULL;
+@@ -1793,6 +1845,15 @@ static void synaptics_rmi4_remove(struct platform_device *pdev)
+ 	unsigned char attr_count;
+ 	struct synaptics_rmi4_data *rmi4_data = platform_get_drvdata(pdev);
+ 
++#ifdef CONFIG_PM
++	if (rmi4_data->follows_panel) {
++		drm_panel_remove_follower(&rmi4_data->panel_follower);
++		rmi4_data->follows_panel = false;
++	}
++	WRITE_ONCE(rmi4_data->resume_pending, false);
++	cancel_delayed_work_sync(&rmi4_data->resume_work);
++#endif
++
+ 	for (attr_count = 0; attr_count < ARRAY_SIZE(attrs); attr_count++) {
+ 		sysfs_remove_file(&rmi4_data->input_dev->dev.kobj,
+ 				&attrs[attr_count].attr);
+@@ -1811,104 +1872,245 @@ static void synaptics_rmi4_remove(struct platform_device *pdev)
+ }
+ 
+ #ifdef CONFIG_PM
+-static void synaptics_rmi4_sensor_sleep(struct synaptics_rmi4_data *rmi4_data)
++static int synaptics_rmi4_sensor_sleep(struct synaptics_rmi4_data *rmi4_data)
+ {
+ 	int retval;
+ 	unsigned char device_ctrl;
+ 
+ 	retval = synaptics_rmi4_reg_read(rmi4_data,
+-			rmi4_data->f01_ctrl_base_addr,
+-			&device_ctrl,
++			rmi4_data->f01_ctrl_base_addr, &device_ctrl,
+ 			sizeof(device_ctrl));
+ 	if (retval < 0) {
+ 		dev_err(rmi4_data->pdev->dev.parent,
+-				"%s: Failed to enter sleep mode\n",
+-				__func__);
+-		return;
++				"%s: Failed to enter sleep mode, error = %d\n",
++				__func__, retval);
++		return retval;
+ 	}
+ 
+-	device_ctrl = (device_ctrl & ~MASK_3BIT);
+-	device_ctrl = (device_ctrl | NO_SLEEP_OFF | SENSOR_SLEEP);
+-
++	device_ctrl = (device_ctrl & ~MASK_3BIT) | NO_SLEEP_OFF | SENSOR_SLEEP;
+ 	retval = synaptics_rmi4_reg_write(rmi4_data,
+-			rmi4_data->f01_ctrl_base_addr,
+-			&device_ctrl,
++			rmi4_data->f01_ctrl_base_addr, &device_ctrl,
+ 			sizeof(device_ctrl));
+ 	if (retval < 0) {
+ 		dev_err(rmi4_data->pdev->dev.parent,
+-				"%s: Failed to enter sleep mode\n",
+-				__func__);
+-		return;
++				"%s: Failed to enter sleep mode, error = %d\n",
++				__func__, retval);
++		return retval;
+ 	}
+ 
+ 	rmi4_data->sensor_sleep = true;
+-
+-	return;
++	return 0;
+ }
+ 
+-static void synaptics_rmi4_sensor_wake(struct synaptics_rmi4_data *rmi4_data)
++static int synaptics_rmi4_sensor_wake(struct synaptics_rmi4_data *rmi4_data)
+ {
+ 	int retval;
+ 	unsigned char device_ctrl;
+-	unsigned char no_sleep_setting = rmi4_data->no_sleep_setting;
+ 
+ 	retval = synaptics_rmi4_reg_read(rmi4_data,
+-			rmi4_data->f01_ctrl_base_addr,
+-			&device_ctrl,
++			rmi4_data->f01_ctrl_base_addr, &device_ctrl,
+ 			sizeof(device_ctrl));
+ 	if (retval < 0) {
+ 		dev_err(rmi4_data->pdev->dev.parent,
+-				"%s: Failed to wake from sleep mode\n",
+-				__func__);
+-		return;
++				"%s: Failed to wake from sleep mode, error = %d\n",
++				__func__, retval);
++		return retval;
+ 	}
+ 
+-	device_ctrl = (device_ctrl & ~MASK_3BIT);
+-	device_ctrl = (device_ctrl | no_sleep_setting | NORMAL_OPERATION);
+-
++	device_ctrl = (device_ctrl & ~MASK_3BIT) |
++			rmi4_data->no_sleep_setting | NORMAL_OPERATION;
+ 	retval = synaptics_rmi4_reg_write(rmi4_data,
+-			rmi4_data->f01_ctrl_base_addr,
+-			&device_ctrl,
++			rmi4_data->f01_ctrl_base_addr, &device_ctrl,
+ 			sizeof(device_ctrl));
+ 	if (retval < 0) {
+ 		dev_err(rmi4_data->pdev->dev.parent,
+-				"%s: Failed to wake from sleep mode\n",
+-				__func__);
+-		return;
++				"%s: Failed to wake from sleep mode, error = %d\n",
++				__func__, retval);
++		return retval;
+ 	}
+ 
+ 	rmi4_data->sensor_sleep = false;
++	return 0;
++}
+ 
+-	return;
++/* Caller serializes lifecycle changes with rmi4_state_mutex. */
++static int synaptics_rmi4_finish_resume(struct synaptics_rmi4_data *rmi4_data)
++{
++	int retval;
++
++	mutex_lock(&rmi4_data->rmi4_reset_mutex);
++	rmi4_data->current_page = MASK_8BIT;
++	retval = synaptics_rmi4_sensor_wake(rmi4_data);
++	mutex_unlock(&rmi4_data->rmi4_reset_mutex);
++	if (retval < 0)
++		return retval;
++
++	/*
++	 * Do not hold rmi4_reset_mutex here.  Clearing pending interrupts may
++	 * detect a spontaneous reset and re-enter reinit_device(), which takes
++	 * the same mutex.
++	 */
++	retval = synaptics_rmi4_irq_enable(rmi4_data, true, false);
++	if (retval < 0)
++		return retval;
++
++	rmi4_data->suspend = false;
++	WRITE_ONCE(rmi4_data->resume_pending, false);
++	return 0;
+ }
+ 
+-static int synaptics_rmi4_suspend(struct device *dev)
++static void synaptics_rmi4_resume_work(struct work_struct *work)
+ {
+-	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
++	int retval;
++	struct synaptics_rmi4_data *rmi4_data =
++			container_of(to_delayed_work(work),
++			struct synaptics_rmi4_data, resume_work);
+ 
+-	if (!rmi4_data->suspend) {
+-		synaptics_rmi4_irq_enable(rmi4_data, false, false);
+-		synaptics_rmi4_sensor_sleep(rmi4_data);
+-		synaptics_rmi4_free_fingers(rmi4_data);
++	mutex_lock(&rmi4_data->rmi4_state_mutex);
++	if (!READ_ONCE(rmi4_data->resume_pending)) {
++		mutex_unlock(&rmi4_data->rmi4_state_mutex);
++		return;
++	}
++
++	rmi4_data->resume_retries++;
++	retval = synaptics_rmi4_finish_resume(rmi4_data);
++	if (retval == 0) {
++		mutex_unlock(&rmi4_data->rmi4_state_mutex);
++		return;
+ 	}
+ 
++	if (rmi4_data->resume_retries >= SYNAPTICS_RMI4_RESUME_MAX_RETRIES) {
++		WRITE_ONCE(rmi4_data->resume_pending, false);
++		dev_err(rmi4_data->pdev->dev.parent,
++				"%s: resume recovery exhausted after %u retries, error = %d\n",
++				__func__, rmi4_data->resume_retries, retval);
++	} else if (READ_ONCE(rmi4_data->resume_pending)) {
++		dev_warn(rmi4_data->pdev->dev.parent,
++				"%s: resume retry %u failed, error = %d\n",
++				__func__, rmi4_data->resume_retries, retval);
++		schedule_delayed_work(&rmi4_data->resume_work,
++				msecs_to_jiffies(SYNAPTICS_RMI4_RESUME_RETRY_MS));
++	}
++	mutex_unlock(&rmi4_data->rmi4_state_mutex);
++}
++
++static int synaptics_rmi4_do_suspend(struct synaptics_rmi4_data *rmi4_data)
++{
++	int restore_ret;
++	int retval;
++
++	/* Drain recovery before publishing suspend or cancelling polling. */
++	WRITE_ONCE(rmi4_data->resume_pending, false);
++	cancel_delayed_work_sync(&rmi4_data->resume_work);
++	mutex_lock(&rmi4_data->rmi4_state_mutex);
+ 	rmi4_data->suspend = true;
++	synaptics_rmi4_irq_enable(rmi4_data, false, false);
+ 
+-	return 0;
++	retval = 0;
++	if (!rmi4_data->sensor_sleep)
++		retval = synaptics_rmi4_sensor_sleep(rmi4_data);
++	synaptics_rmi4_free_fingers(rmi4_data);
++	if (retval < 0) {
++		/* PM does not guarantee a resume callback after failed suspend. */
++		WRITE_ONCE(rmi4_data->resume_pending, true);
++		rmi4_data->resume_retries = 0;
++		restore_ret = synaptics_rmi4_finish_resume(rmi4_data);
++		if (restore_ret < 0) {
++			dev_err(rmi4_data->pdev->dev.parent,
++					"%s: failed to restore active state, error = %d\n",
++					__func__, restore_ret);
++			schedule_delayed_work(&rmi4_data->resume_work,
++					msecs_to_jiffies(SYNAPTICS_RMI4_RESUME_RETRY_MS));
++		}
++	}
++	mutex_unlock(&rmi4_data->rmi4_state_mutex);
++	return retval;
+ }
+ 
+-static int synaptics_rmi4_resume(struct device *dev)
++static int synaptics_rmi4_do_panel_unprepare(
++		struct synaptics_rmi4_data *rmi4_data)
++{
++	int retval = 0;
++
++	/*
++	 * DRM continues unpreparing the panel even when a follower fails.  Do
++	 * not roll back or queue bus recovery while the shared rails can be off.
++	 * Keeping suspend asserted makes panel_prepared() restore the controller.
++	 */
++	WRITE_ONCE(rmi4_data->resume_pending, false);
++	cancel_delayed_work_sync(&rmi4_data->resume_work);
++	mutex_lock(&rmi4_data->rmi4_state_mutex);
++	rmi4_data->suspend = true;
++	synaptics_rmi4_irq_enable(rmi4_data, false, false);
++	if (!rmi4_data->sensor_sleep)
++		retval = synaptics_rmi4_sensor_sleep(rmi4_data);
++	synaptics_rmi4_free_fingers(rmi4_data);
++	mutex_unlock(&rmi4_data->rmi4_state_mutex);
++
++	return retval;
++}
++
++static int synaptics_rmi4_do_resume(struct synaptics_rmi4_data *rmi4_data)
++{
++	int retval;
++
++	WRITE_ONCE(rmi4_data->resume_pending, true);
++	rmi4_data->resume_retries = 0;
++	mutex_lock(&rmi4_data->rmi4_state_mutex);
++	retval = synaptics_rmi4_finish_resume(rmi4_data);
++	mutex_unlock(&rmi4_data->rmi4_state_mutex);
++	if (retval < 0) {
++		dev_warn(rmi4_data->pdev->dev.parent,
++				"%s: initial resume failed, error = %d; scheduling recovery\n",
++				__func__, retval);
++		schedule_delayed_work(&rmi4_data->resume_work,
++				msecs_to_jiffies(SYNAPTICS_RMI4_RESUME_RETRY_MS));
++	}
++
++	return retval;
++}
++
++static int synaptics_rmi4_panel_prepared(struct drm_panel_follower *follower)
++{
++	struct synaptics_rmi4_data *rmi4_data = container_of(follower,
++			struct synaptics_rmi4_data, panel_follower);
++
++	/* Registration can happen while an already-active panel is prepared. */
++	if (!rmi4_data->suspend && !rmi4_data->sensor_sleep)
++		return 0;
++
++	return synaptics_rmi4_do_resume(rmi4_data);
++}
++
++static int synaptics_rmi4_panel_unpreparing(
++		struct drm_panel_follower *follower)
++{
++	struct synaptics_rmi4_data *rmi4_data = container_of(follower,
++			struct synaptics_rmi4_data, panel_follower);
++
++	return synaptics_rmi4_do_panel_unprepare(rmi4_data);
++}
++
++static int synaptics_rmi4_suspend(struct device *dev)
+ {
+ 	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+ 
+-	rmi4_data->current_page = MASK_8BIT;
++	/* The panel callback runs while the shared rails and reset are usable. */
++	if (rmi4_data->follows_panel)
++		return 0;
+ 
+-	synaptics_rmi4_sensor_wake(rmi4_data);
+-	synaptics_rmi4_irq_enable(rmi4_data, true, false);
++	return synaptics_rmi4_do_suspend(rmi4_data);
++}
+ 
+-	rmi4_data->suspend = false;
++static int synaptics_rmi4_resume(struct device *dev)
++{
++	struct synaptics_rmi4_data *rmi4_data = dev_get_drvdata(dev);
+ 
+-	return 0;
++	/* Wait for panel_prepared(), after supplies and reset are restored. */
++	if (rmi4_data->follows_panel)
++		return 0;
++
++	return synaptics_rmi4_do_resume(rmi4_data);
+ }
+ 
+ static const struct dev_pm_ops synaptics_rmi4_dev_pm_ops = {
+diff --git a/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.h b/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.h
+index 59cedcc..ed15d52 100644
+--- a/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.h
++++ b/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_core.h
+@@ -19,10 +19,12 @@
+ #ifndef _SYNAPTICS_DSX_RMI4_H_
+ #define _SYNAPTICS_DSX_RMI4_H_
+ 
++#include <drm/drm_panel.h>
++
+ #define SYNAPTICS_DS4 (1 << 0)
+ #define SYNAPTICS_DS5 (1 << 1)
+ #define SYNAPTICS_DSX_DRIVER_PRODUCT (SYNAPTICS_DS4 | SYNAPTICS_DS5)
+-#define SYNAPTICS_DSX_DRIVER_VERSION 0x2004
++#define SYNAPTICS_DSX_DRIVER_VERSION 0x2005
+ 
+ #define sstrtoul(...) kstrtoul(__VA_ARGS__)
+ 
+@@ -178,6 +180,7 @@ struct synaptics_rmi4_data {
+ 	struct synaptics_rmi4_device_info rmi4_mod_info;
+ 	struct regulator *pwr_reg;
+ 	struct regulator *bus_reg;
++	struct mutex rmi4_state_mutex;
+ 	struct mutex rmi4_reset_mutex;
+ 	struct mutex rmi4_report_mutex;
+ 	struct mutex rmi4_io_ctrl_mutex;
+@@ -206,6 +209,11 @@ struct synaptics_rmi4_data {
+ 	bool wedge_sensor;
+ 	bool polling_mode;
+ 	struct delayed_work polling_work;
++	struct delayed_work resume_work;
++	unsigned int resume_retries;
++	bool resume_pending;
++	struct drm_panel_follower panel_follower;
++	bool follows_panel;
+ 	struct {
+ 		int x;
+ 		int y;
+diff --git a/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_i2c.c b/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_i2c.c
+index d4dd395..42e90b3 100644
+--- a/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_i2c.c
++++ b/drivers/input/touchscreen/synaptics_dsx/synaptics_dsx_i2c.c
+@@ -162,7 +162,7 @@ static void synaptics_rmi4_i2c_check_addr(struct synaptics_rmi4_data *rmi4_data,
+ static int synaptics_rmi4_i2c_set_page(struct synaptics_rmi4_data *rmi4_data,
+ 		unsigned short addr)
+ {
+-	int retval;
++	int transfer_ret = -EIO;
+ 	unsigned char retry;
+ 	unsigned char buf[PAGE_SELECT_LEN];
+ 	unsigned char page;
+@@ -180,10 +180,10 @@ static int synaptics_rmi4_i2c_set_page(struct synaptics_rmi4_data *rmi4_data,
+ 
+ 	if (page != rmi4_data->current_page) {
+ 		for (retry = 0; retry < SYN_I2C_RETRY_TIMES; retry++) {
+-			if (i2c_transfer(i2c->adapter, msg, 1) == 1) {
++			transfer_ret = i2c_transfer(i2c->adapter, msg, 1);
++			if (transfer_ret == 1) {
+ 				rmi4_data->current_page = page;
+-				retval = PAGE_SELECT_LEN;
+-				break;
++				return PAGE_SELECT_LEN;
+ 			}
+ 			dev_err(rmi4_data->pdev->dev.parent,
+ 					"%s: I2C retry %d\n",
+@@ -196,16 +196,17 @@ static int synaptics_rmi4_i2c_set_page(struct synaptics_rmi4_data *rmi4_data,
+ 			}
+ 		}
+ 	} else {
+-		retval = PAGE_SELECT_LEN;
++		return PAGE_SELECT_LEN;
+ 	}
+ 
+-	return retval;
++	return transfer_ret < 0 ? transfer_ret : -EIO;
+ }
+ 
+ static int synaptics_rmi4_i2c_read(struct synaptics_rmi4_data *rmi4_data,
+ 		unsigned short addr, unsigned char *data, unsigned short length)
+ {
+ 	int retval;
++	int transfer_ret = -EIO;
+ 	unsigned char retry;
+ 	unsigned char buf;
+ 	struct i2c_client *i2c = to_i2c_client(rmi4_data->pdev->dev.parent);
+@@ -215,7 +216,7 @@ static int synaptics_rmi4_i2c_read(struct synaptics_rmi4_data *rmi4_data,
+ 
+ 	retval = synaptics_rmi4_i2c_set_page(rmi4_data, addr);
+ 	if (retval != PAGE_SELECT_LEN) {
+-		retval = -EIO;
++		retval = retval < 0 ? retval : -EIO;
+ 		goto exit;
+ 	}
+ 
+@@ -232,7 +233,8 @@ static int synaptics_rmi4_i2c_read(struct synaptics_rmi4_data *rmi4_data,
+ 	buf = addr & MASK_8BIT;
+ 
+ 	for (retry = 0; retry < SYN_I2C_RETRY_TIMES; retry++) {
+-		if (i2c_transfer(i2c->adapter, msg, 2) == 2) {
++		transfer_ret = i2c_transfer(i2c->adapter, msg, 2);
++		if (transfer_ret == 2) {
+ 			retval = length;
+ 			break;
+ 		}
+@@ -252,7 +254,7 @@ static int synaptics_rmi4_i2c_read(struct synaptics_rmi4_data *rmi4_data,
+ 		dev_err(rmi4_data->pdev->dev.parent,
+ 				"%s: I2C read over retry limit\n",
+ 				__func__);
+-		retval = -EIO;
++		retval = transfer_ret < 0 ? transfer_ret : -EIO;
+ 	}
+ 
+ exit:
+@@ -265,6 +267,7 @@ static int synaptics_rmi4_i2c_write(struct synaptics_rmi4_data *rmi4_data,
+ 		unsigned short addr, unsigned char *data, unsigned short length)
+ {
+ 	int retval;
++	int transfer_ret = -EIO;
+ 	unsigned char retry;
+ 	unsigned char *buf;
+ 	struct i2c_client *i2c = to_i2c_client(rmi4_data->pdev->dev.parent);
+@@ -278,7 +281,7 @@ static int synaptics_rmi4_i2c_write(struct synaptics_rmi4_data *rmi4_data,
+ 
+ 	retval = synaptics_rmi4_i2c_set_page(rmi4_data, addr);
+ 	if (retval != PAGE_SELECT_LEN) {
+-		retval = -EIO;
++		retval = retval < 0 ? retval : -EIO;
+ 		goto exit;
+ 	}
+ 
+@@ -297,7 +300,8 @@ static int synaptics_rmi4_i2c_write(struct synaptics_rmi4_data *rmi4_data,
+ 	}
+ 
+ 	for (retry = 0; retry < SYN_I2C_RETRY_TIMES; retry++) {
+-		if (i2c_transfer(i2c->adapter, msg, 1) == 1) {
++		transfer_ret = i2c_transfer(i2c->adapter, msg, 1);
++		if (transfer_ret == 1) {
+ 			retval = length;
+ 			break;
+ 		}
+@@ -316,7 +320,7 @@ static int synaptics_rmi4_i2c_write(struct synaptics_rmi4_data *rmi4_data,
+ 		dev_err(rmi4_data->pdev->dev.parent,
+ 				"%s: I2C write over retry limit\n",
+ 				__func__);
+-		retval = -EIO;
++		retval = transfer_ret < 0 ? transfer_ret : -EIO;
+ 	}
+ 
+ exit:
