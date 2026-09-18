@@ -1,0 +1,66 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: qcom_battmgr: report PD-PPS adapter type
+
+Pocket EVO firmware reports USB_TYPE as SDP while USB_ADAP_TYPE correctly
+reports PD_PPS (8). The generic usb_type sysfs value therefore cannot be
+used as a safe direct-charge preflight.
+
+Track the raw adapter type from a best-effort USB_ADAP_TYPE query and
+report POWER_SUPPLY_USB_TYPE_PD_PPS only when that query completed with
+the raw value 8. Fall back to the existing protocol type otherwise, so
+other Qualcomm platforms retain current behavior.
+
+---
+--- a/drivers/power/supply/qcom_battmgr.c
++++ b/drivers/power/supply/qcom_battmgr.c
+@@ -298,6 +298,8 @@
+ 	unsigned int current_max;
+ 	unsigned int current_limit;
+ 	unsigned int usb_type;
++	unsigned int adapter_type;
++	bool adapter_type_valid;
+ };
+ 
+ struct qcom_battmgr_wireless {
+@@ -1027,6 +1029,12 @@
+ 
+ 	mutex_lock(&battmgr->lock);
+ 	ret = qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET, prop, 0);
++	/* Best-effort raw adapter query; authoritative for PD-PPS on Pocket EVO. */
++	if (!ret && !qcom_battmgr_request_property(battmgr, BATTMGR_USB_PROPERTY_GET,
++						   USB_ADAP_TYPE, 0))
++		battmgr->usb.adapter_type_valid = true;
++	else
++		battmgr->usb.adapter_type_valid = false;
+ 	mutex_unlock(&battmgr->lock);
+ 
+ 	return ret;
+@@ -1070,7 +1078,17 @@
+ 		val->intval = battmgr->usb.current_limit;
+ 		break;
+ 	case POWER_SUPPLY_PROP_USB_TYPE:
+-		val->intval = battmgr->usb.usb_type;
++		/*
++		 * Pocket EVO firmware reports the protocol type (SDP) on
++		 * USB_TYPE even when the raw USB_ADAP_TYPE read is PD_PPS.
++		 * The adapter read is authoritative for PPS on this machine;
++		 * fall back to the protocol type everywhere else.
++		 */
++		if (battmgr->usb.adapter_type_valid &&
++		    battmgr->usb.adapter_type == 8)
++			val->intval = POWER_SUPPLY_USB_TYPE_PD_PPS;
++		else
++			val->intval = battmgr->usb.usb_type;
+ 		break;
+ 	default:
+ 		return -EINVAL;
+@@ -1634,6 +1652,9 @@
+ 		case USB_TYPE:
+ 			battmgr->usb.usb_type = le32_to_cpu(resp->intval.value);
+ 			break;
++		case USB_ADAP_TYPE:
++			battmgr->usb.adapter_type = le32_to_cpu(resp->intval.value);
++			break;
+ 		default:
+ 			dev_warn(battmgr->dev, "unknown property %#x\n", property);
+ 			break;

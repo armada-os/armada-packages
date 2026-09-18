@@ -1,0 +1,217 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: hl7139: latch faults and report VBAT
+
+The HL7139 status registers are read-to-clear.  A userspace health read or
+the threaded IRQ can therefore consume a transient fault before the other
+observer sees it, allowing a later direct-charge attempt to appear healthy.
+
+Serialize status reads and retain electrical/thermal fault bits in software.
+The latch is cleared only when VBUS is absent and pump presence is read, so a
+cable cycle is required before re-arming.  Also expose the pump-local battery
+ADC as voltage_avg for pair-level coherence checks.
+
+---
+ drivers/power/supply/hl7139_charger.c | 86 +++++++++++++++++++++++++++------
+ 1 file changed, 71 insertions(+), 15 deletions(-)
+
+--- a/drivers/power/supply/hl7139_charger.c
++++ b/drivers/power/supply/hl7139_charger.c
+@@ -15,6 +15,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/mod_devicetable.h>
++#include <linux/mutex.h>
+ #include <linux/pm.h>
+ #include <linux/power_supply.h>
+ #include <linux/property.h>
+@@ -29,0 +31,1 @@
++#define  HL7139_STS_A_FAULTS	(BIT(7) | BIT(3))
+@@ -34,0 +37,1 @@
++#define  HL7139_STS_B_FAULTS	(BIT(7) | BIT(6) | BIT(3) | BIT(0))
+@@ -106,6 +111,9 @@ struct hl7139 {
+ 	struct gpio_desc *irq_gpiod;
+ 	struct power_supply *psy;
+ 	struct power_supply_desc psy_desc;
++	struct mutex status_lock;
++	unsigned int fault_a;
++	unsigned int fault_b;
+ };
+ 
+ /*
+@@ -133,21 +141,29 @@ static const struct reg_sequence hl7139_pocket_evo_init[] = {
+ 	{ 0x40, 0x05 },
+ };
+ 
+-static int hl7139_clear_irqs(struct hl7139 *chip)
++static int hl7139_clear_irqs(struct hl7139 *chip, bool discard_faults)
+ {
+ 	static const u8 read_to_clear_regs[] = {
+ 		0x01, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00,
+ 	};
+ 	unsigned int val;
+ 	int i, ret;
+ 
++	mutex_lock(&chip->status_lock);
+ 	for (i = 0; i < ARRAY_SIZE(read_to_clear_regs); i++) {
+ 		ret = regmap_read(chip->regmap, read_to_clear_regs[i], &val);
+ 		if (ret)
+-			return ret;
++			goto out_unlock;
++		if (!discard_faults && read_to_clear_regs[i] == HL7139_REG_STATUS_A)
++			chip->fault_a |= val & HL7139_STS_A_FAULTS;
++		if (!discard_faults && read_to_clear_regs[i] == HL7139_REG_STATUS_B)
++			chip->fault_b |= val & HL7139_STS_B_FAULTS;
+ 	}
+ 
+-	return 0;
++	ret = 0;
++out_unlock:
++	mutex_unlock(&chip->status_lock);
++	return ret;
+ }
+ 
+ static int hl7139_read_adc(struct hl7139 *chip, u8 reg, int lsb)
+@@ -177,17 +194,36 @@ static int hl7139_iin_now(struct hl7139 *chip)
+ 	return hl7139_read_adc(chip, HL7139_REG_ADC_IIN, lsb);
+ }
+ 
+-static int hl7139_health(struct hl7139 *chip)
++static int hl7139_read_faults(struct hl7139 *chip, unsigned int *a,
++			      unsigned int *b)
+ {
+-	unsigned int a, b;
+ 	int ret;
+ 
+-	ret = regmap_read(chip->regmap, HL7139_REG_STATUS_A, &a);
++	mutex_lock(&chip->status_lock);
++	ret = regmap_read(chip->regmap, HL7139_REG_STATUS_A, a);
+ 	if (ret)
+-		return ret;
+-	ret = regmap_read(chip->regmap, HL7139_REG_STATUS_B, &b);
++		goto out_unlock;
++	ret = regmap_read(chip->regmap, HL7139_REG_STATUS_B, b);
+ 	if (ret)
+-		return ret;
++		goto out_unlock;
++	chip->fault_a |= *a & HL7139_STS_A_FAULTS;
++	chip->fault_b |= *b & HL7139_STS_B_FAULTS;
++	*a = chip->fault_a;
++	*b = chip->fault_b;
++
++out_unlock:
++	mutex_unlock(&chip->status_lock);
++	return ret;
++}
++
++static int hl7139_health(struct hl7139 *chip)
++{
++	unsigned int a, b;
++	int ret;
++
++	ret = hl7139_read_faults(chip, &a, &b);
++	if (ret)
++		return ret;
+ 
+ 	if (b & HL7139_STS_B_THSD)
+ 		return POWER_SUPPLY_HEALTH_OVERHEAT;
+@@ -239,10 +277,15 @@ static int hl7139_set_charge_enable(struct hl7139 *chip, bool en)
+ 		if (tdie / 1000 > HL7139_SAFE_TDIE_MAX_DECI_C)
+ 			return -ERANGE;
+ 
+-		/* Android clears all read-to-clear IRQ state before CHG_EN. */
+-		ret = hl7139_clear_irqs(chip);
++		/* Preserve any fault that arrives between the gates and CHG_EN. */
++		ret = hl7139_clear_irqs(chip, false);
+ 		if (ret)
+ 			return ret;
++		health = hl7139_health(chip);
++		if (health < 0)
++			return health;
++		if (health != POWER_SUPPLY_HEALTH_GOOD)
++			return -EIO;
+ 	}
+ 
+ 	return regmap_update_bits(chip->regmap, HL7139_REG_CTRL0,
+@@ -255,6 +299,7 @@ static enum power_supply_property hl7139_props[] = {
+ 	POWER_SUPPLY_PROP_STATUS,
+ 	POWER_SUPPLY_PROP_HEALTH,
+ 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
++	POWER_SUPPLY_PROP_VOLTAGE_AVG,
+ 	POWER_SUPPLY_PROP_CURRENT_NOW,
+ 	POWER_SUPPLY_PROP_TEMP,
+ 	POWER_SUPPLY_PROP_MODEL_NAME,
+@@ -275,6 +320,12 @@ static int hl7139_get_prop(struct power_supply *psy,
+ 		if (ret)
+ 			return ret;
+ 		val->intval = !!(reg & HL7139_STS_C_VBUS_GOOD);
++		if (!val->intval) {
++			mutex_lock(&chip->status_lock);
++			chip->fault_a = 0;
++			chip->fault_b = 0;
++			mutex_unlock(&chip->status_lock);
++		}
+ 		return 0;
+ 	case POWER_SUPPLY_PROP_ONLINE:
+ 	case POWER_SUPPLY_PROP_STATUS:
+@@ -297,6 +348,9 @@ static int hl7139_get_prop(struct power_supply *psy,
+ 		return 0;
+ 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+ 		ret = hl7139_read_adc(chip, HL7139_REG_ADC_VIN, HL7139_VIN_LSB_UV);
++		break;
++	case POWER_SUPPLY_PROP_VOLTAGE_AVG:
++		ret = hl7139_read_adc(chip, HL7139_REG_ADC_VBAT, HL7139_VBAT_LSB_UV);
+ 		break;
+ 	case POWER_SUPPLY_PROP_CURRENT_NOW:
+ 		ret = hl7139_iin_now(chip);
+@@ -360,10 +414,8 @@ static irqreturn_t hl7139_irq(int irq, void *data)
+ 	struct hl7139 *chip = data;
+ 	unsigned int a, b;
+ 
+-	if (regmap_read(chip->regmap, HL7139_REG_STATUS_A, &a) ||
+-	    regmap_read(chip->regmap, HL7139_REG_STATUS_B, &b))
++	if (hl7139_read_faults(chip, &a, &b))
+ 		return IRQ_NONE;
+-
+ 	if (a & HL7139_STS_A_VIN_OVP)
+ 		dev_warn(chip->dev, "VIN OVP\n");
+ 	if (a & HL7139_STS_A_VBAT_OVP)
+@@ -414,6 +465,7 @@ static int hl7139_probe(struct i2c_client *client)
+ 	if (!chip)
+ 		return -ENOMEM;
+ 	chip->dev = dev;
++	mutex_init(&chip->status_lock);
+ 	i2c_set_clientdata(client, chip);
+ 
+ 	chip->regmap = devm_regmap_init_i2c(client, &hl7139_regmap);
+@@ -436,7 +488,7 @@ static int hl7139_probe(struct i2c_client *client)
+ 		return dev_err_probe(dev, ret,
+ 				     "failed to initialize charge pump\n");
+ 
+-	ret = hl7139_clear_irqs(chip);
++	ret = hl7139_clear_irqs(chip, true);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "failed to clear IRQ state\n");
+ 
+@@ -486,6 +538,14 @@ static void hl7139_remove(struct i2c_client *client)
+ 		hl7139_set_charge_enable(chip, false);
+ }
+ 
++static void hl7139_shutdown(struct i2c_client *client)
++{
++	struct hl7139 *chip = i2c_get_clientdata(client);
++
++	if (chip)
++		hl7139_set_charge_enable(chip, false);
++}
++
+ /*
+  * Suspend safety: a direct-charge session must not survive a suspend.
+  * The charge pumps sit between VBUS and the battery with no PMIC
+@@ -506,6 +566,7 @@ static struct i2c_driver hl7139_driver = {
+ 	},
+ 	.probe = hl7139_probe,
+ 	.remove = hl7139_remove,
++	.shutdown = hl7139_shutdown,
+ 	.id_table = hl7139_i2c_id,
+ };
+ module_i2c_driver(hl7139_driver);

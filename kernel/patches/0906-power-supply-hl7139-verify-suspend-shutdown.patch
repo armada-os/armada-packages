@@ -1,0 +1,41 @@
+From: Armada <noreply@armada.local>
+Subject: [PATCH] power: supply: hl7139: fail suspend if shutdown fails
+
+Do not report a successful suspend preparation when the I2C disable write
+failed or CHG_EN remained set.  Propagating the error aborts suspend while
+userspace monitoring is still available instead of leaving an uncontrolled
+direct-charge path through sleep.
+
+---
+ drivers/power/supply/hl7139_charger.c | 19 ++++++++++++++++++-
+ 1 file changed, 18 insertions(+), 1 deletion(-)
+
+--- a/drivers/power/supply/hl7139_charger.c
++++ b/drivers/power/supply/hl7139_charger.c
+@@ -555,8 +555,25 @@ static void hl7139_shutdown(struct i2c_client *client)
+ static int hl7139_suspend(struct device *dev)
+ {
+ 	struct hl7139 *chip = dev_get_drvdata(dev);
++	unsigned int ctrl0;
++	int ret;
+ 
+-	hl7139_set_charge_enable(chip, false);
++	ret = hl7139_set_charge_enable(chip, false);
++	if (ret) {
++		dev_err(dev, "failed to disable charge pump for suspend: %d\n", ret);
++		return ret;
++	}
++
++	ret = regmap_read(chip->regmap, HL7139_REG_CTRL0, &ctrl0);
++	if (ret) {
++		dev_err(dev, "failed to verify charge pump shutdown: %d\n", ret);
++		return ret;
++	}
++	if (ctrl0 & HL7139_CTRL0_CHG_EN) {
++		dev_err(dev, "charge pump remained enabled; aborting suspend\n");
++		return -EBUSY;
++	}
++
+ 	return 0;
+ }
+ 
