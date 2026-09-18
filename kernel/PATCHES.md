@@ -171,6 +171,10 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
 - `patches/0060-input-touchscreen-add-synaptics-dsx-driver.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8550/patches/linux/0060-input-touchscreen-add-synaptics-dsx-driver.patch
   upstream: unknown
+- `patches/0060a-input-synaptics-dsx-follow-display-panel-power-lifecycle.patch`
+  source: armada
+  upstream: local
+  notes: Adds DRM panel-follower lifecycle handling for the Pocket ACE's panel-integrated Synaptics controller, keeps device PM bus-silent when the panel owns sequencing, serializes reset and PM transitions, bounds resume recovery, and preserves transport errors.
 - `patches/0058-input-joystick-add-ayaneo-mcu-joystick.patch`
   source: https://github.com/ROCKNIX/distribution/blob/bcf3b5bc574990b96543484575b06f912153a715/projects/ROCKNIX/devices/SM8750/patches/linux/0058-input-joystick-add-ayaneo-mcu-joystick.patch
   upstream: unknown
@@ -598,7 +602,7 @@ no equivalent submission was found, or a permanent URL to the upstream submissio
   notes: Armada keeps volume-up from waking the system and removes the SDHCI capability mask after copying `dts/qcs8550-ayaneo-pocket-common.dtsi`.
 - `dts/qcs8550-ayaneo-pocketace.dts.patch`
   source: armada
-  notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketace.dts`.
+  notes: Armada wires the SY7758 enable GPIO and associates the panel-integrated Synaptics touchscreen with its display panel after copying `dts/qcs8550-ayaneo-pocketace.dts`.
 - `dts/qcs8550-ayaneo-pocketdmg.dts.patch`
   source: armada
   notes: Armada applies this local patch after copying `dts/qcs8550-ayaneo-pocketdmg.dts`.
